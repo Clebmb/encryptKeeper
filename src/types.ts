@@ -22,6 +22,7 @@ export interface SessionStatus {
   selected_private_key: string | null;
   selected_recipients: string[];
   inactivity_timeout_secs: number;
+  remaining_auto_lock_secs: number | null;
   recursive_scan: boolean;
   auto_save: boolean;
 }

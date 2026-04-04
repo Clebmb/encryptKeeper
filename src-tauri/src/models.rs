@@ -31,6 +31,7 @@ pub struct SessionStatus {
     pub selected_private_key: Option<String>,
     pub selected_recipients: Vec<String>,
     pub inactivity_timeout_secs: u64,
+    pub remaining_auto_lock_secs: Option<u64>,
     pub recursive_scan: bool,
     pub auto_save: bool,
 }

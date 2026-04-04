@@ -1,57 +1,75 @@
 # encryptKeeper
 
-Tauri-first desktop secure notepad for `.gpg` text notes.
+Desktop app for managing encrypted `.gpg` text notes in a folder vault.
 
-## Current state
+## What it does
 
-- Browser mock mode is available now for testing the UI without Rust, Tauri, or GPG.
-- Real desktop mode exists as a Tauri/Rust scaffold with folder-vault flows and GPG integration points.
-- Archive support is planned but not implemented yet.
+encryptKeeper is a Tauri desktop app for writing, opening, and managing OpenPGP-encrypted note files on your PC. It uses your local GnuPG installation for key import, encryption, decryption, and passphrase verification.
 
-## Run the UI right now
+## Features
+
+- Open a folder vault and scan it for `.gpg` note files
+- Create, open, edit, rename, and delete encrypted notes
+- Encrypt notes to one or more selected recipient keys
+- Import public and private OpenPGP key files
+- Choose a private key for decryption and session unlock
+- Unlock and lock the app without exposing plaintext after lock
+- Auto-lock after a configurable inactivity timeout, or disable auto-lock entirely
+- Optional auto-save while unlocked
+- Compact desktop UI built for note editing and key management
+
+## Windows Releases
+
+If you just want to use the app, download a built Windows release from the repository Releases page.
+
+## Installation
+
+If you want to run from source, install:
+
+- Node.js
+- Rust
+- GnuPG
+- Tauri prerequisites for Windows
+
+Then install dependencies:
 
 ```powershell
 npm install
-npm run dev
 ```
 
-Open the Vite URL shown in the terminal.
+## Environment Check
 
-This launches browser mock mode:
-- no real encryption
-- no real filesystem access
-- demo notes and keys stored in browser local storage
-
-## Run the desktop app
-
-First install prerequisites:
-- Rust toolchain with `cargo` and `rustc`
-- GnuPG with `gpg` on `PATH`
-- Tauri platform prerequisites for Windows
-
-Check your environment:
+Verify the required tools are available:
 
 ```powershell
 npm run check:env
 ```
 
-Then run:
+## Development
+
+Run the desktop app in development mode:
 
 ```powershell
 npm run tauri:dev
 ```
 
-## Useful scripts
+## Build
+
+Create a production build:
 
 ```powershell
-npm run dev
-npm run test
-npm run build
-npm run check:env
-npm run tauri:dev
 npm run tauri:build
 ```
 
-## Important note
+## Other Scripts
 
-Mock mode exists only to test the UI and workflow shape. The real security properties depend on the Rust backend and system GPG tooling, not the browser fallback.
+```powershell
+npm run build
+npm run test
+```
+
+## Notes
+
+- This is a desktop project for PC use.
+- Imported keys are handled through your local GnuPG keyring, not stored in the repository.
+- Browser mock mode exists for UI development, but the real app flow is the desktop Tauri build.

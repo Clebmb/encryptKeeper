@@ -21,6 +21,7 @@ const defaultStatus: SessionStatus = {
   selected_private_key: null,
   selected_recipients: [],
   inactivity_timeout_secs: 900,
+  remaining_auto_lock_secs: null,
   recursive_scan: true,
   auto_save: false,
 };
@@ -247,6 +248,8 @@ export async function unlockSession(passphrase: string): Promise<void> {
     status: {
       ...current.status,
       session_unlocked: true,
+      remaining_auto_lock_secs:
+        current.status.inactivity_timeout_secs === 0 ? null : current.status.inactivity_timeout_secs,
     },
   }));
 }
@@ -257,6 +260,7 @@ export async function lockSession(): Promise<void> {
     status: {
       ...current.status,
       session_unlocked: false,
+      remaining_auto_lock_secs: null,
     },
   }));
 }
@@ -272,6 +276,8 @@ export async function updatePreferences(
       ...current.status,
       recursive_scan: recursiveScan,
       inactivity_timeout_secs: inactivityTimeoutSecs,
+      remaining_auto_lock_secs:
+        current.status.session_unlocked && inactivityTimeoutSecs > 0 ? inactivityTimeoutSecs : null,
       auto_save: autoSave,
     },
   }));

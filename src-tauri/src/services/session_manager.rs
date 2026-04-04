@@ -31,9 +31,6 @@ impl SessionManager {
         self.unlocked = true;
         self.passphrase = Some(Zeroizing::new(passphrase));
         self.last_activity = Some(Instant::now());
-        if self.inactivity_timeout.is_zero() {
-            self.inactivity_timeout = Duration::from_secs(900);
-        }
     }
 
     pub fn lock(&mut self) {
@@ -64,14 +61,24 @@ impl SessionManager {
     }
 
     pub fn set_timeout_secs(&mut self, secs: u64) {
-        self.inactivity_timeout = Duration::from_secs(secs.max(60));
+        self.inactivity_timeout = Duration::from_secs(if secs == 0 { 0 } else { secs.max(60) });
     }
 
     pub fn timeout_secs(&self) -> u64 {
-        match self.inactivity_timeout.as_secs() {
-            0 => 900,
-            secs => secs,
+        self.inactivity_timeout.as_secs()
+    }
+
+    pub fn remaining_timeout_secs(&mut self) -> Option<u64> {
+        self.expire_if_idle();
+        if !self.unlocked || self.inactivity_timeout.is_zero() {
+            return None;
         }
+
+        self.last_activity.map(|last_activity| {
+            self.inactivity_timeout
+                .saturating_sub(last_activity.elapsed())
+                .as_secs()
+        })
     }
 
     pub fn set_auto_save(&mut self, enabled: bool) {
@@ -95,7 +102,7 @@ impl SessionManager {
             return;
         }
         if self.inactivity_timeout.is_zero() {
-            self.inactivity_timeout = Duration::from_secs(900);
+            return;
         }
         if let Some(last_activity) = self.last_activity {
             if last_activity.elapsed() >= self.inactivity_timeout {

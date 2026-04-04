@@ -1,8 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   FileKey,
   FolderOpen,
-  KeyRound,
   Lock,
   NotebookPen,
   RefreshCcw,
@@ -57,6 +56,7 @@ const defaultStatus: SessionStatus = {
   selected_private_key: null,
   selected_recipients: [],
   inactivity_timeout_secs: 900,
+  remaining_auto_lock_secs: null,
   recursive_scan: true,
   auto_save: false,
 };
@@ -69,30 +69,30 @@ function formatFingerprint(fingerprint: string) {
 }
 
 function formatTimeout(seconds: number) {
+  if (seconds === 0) {
+    return "Auto-lock off";
+  }
   const minutes = Math.max(1, Math.round(seconds / 60));
-  return `${minutes} min`;
+  return `${minutes} min auto-lock`;
 }
 
-function StatCard({
-  label,
-  value,
-  caption,
-}: {
-  label: string;
-  value: string | number;
-  caption: string;
-}) {
-  return (
-    <Card className="border-white/10 bg-card/70">
-      <CardContent className="space-y-2 p-5">
-        <p className="text-xs font-medium uppercase tracking-[0.2em] text-muted-foreground">
-          {label}
-        </p>
-        <div className="text-2xl font-semibold tracking-tight">{value}</div>
-        <p className="text-sm text-muted-foreground">{caption}</p>
-      </CardContent>
-    </Card>
-  );
+function formatCountdown(seconds: number | null, unlocked: boolean, timeoutSecs: number) {
+  if (timeoutSecs === 0) {
+    return "Auto-lock disabled";
+  }
+  if (!unlocked) {
+    return "Starts after unlock";
+  }
+  if (seconds === null) {
+    return "Tracking inactivity";
+  }
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return `Locks in ${mins}:${secs.toString().padStart(2, "0")}`;
+}
+
+function activeVaultLabel(vaultKind: SessionStatus["vault_kind"]) {
+  return vaultKind === "none" ? "No vault" : `${vaultKind} vault`;
 }
 
 export function App() {
@@ -107,9 +107,19 @@ export function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [passphrase, setPassphrase] = useState("");
+  const [timeoutMinutesInput, setTimeoutMinutesInput] = useState("15");
+  const [countdownSecs, setCountdownSecs] = useState<number | null>(null);
+  const wasUnlockedRef = useRef(status.session_unlocked);
 
   async function refreshStatus() {
-    setStatus(await getStatus());
+    const nextStatus = await getStatus();
+    setStatus(nextStatus);
+    setCountdownSecs(nextStatus.remaining_auto_lock_secs);
+    setTimeoutMinutesInput(
+      nextStatus.inactivity_timeout_secs === 0
+        ? ""
+        : String(Math.max(1, Math.round(nextStatus.inactivity_timeout_secs / 60))),
+    );
   }
 
   async function refreshKeys() {
@@ -149,6 +159,35 @@ export function App() {
     return () => window.clearTimeout(timer);
   }, [dirty, editorValue, selectedNote, status.auto_save, status.session_unlocked]);
 
+  useEffect(() => {
+    setCountdownSecs(status.remaining_auto_lock_secs);
+  }, [status.remaining_auto_lock_secs]);
+
+  useEffect(() => {
+    if (wasUnlockedRef.current && !status.session_unlocked) {
+      setEditorValue("");
+      setDirty(false);
+    }
+    wasUnlockedRef.current = status.session_unlocked;
+  }, [status.session_unlocked]);
+
+  useEffect(() => {
+    if (!status.session_unlocked || status.inactivity_timeout_secs === 0 || countdownSecs === null) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      setCountdownSecs((current) => {
+        if (current === null) {
+          return null;
+        }
+        return current > 0 ? current - 1 : 0;
+      });
+    }, 1_000);
+
+    return () => window.clearInterval(timer);
+  }, [status.session_unlocked, status.inactivity_timeout_secs, countdownSecs]);
+
   const filteredNotes = useMemo(() => {
     const needle = search.trim().toLowerCase();
     if (!needle) {
@@ -156,6 +195,11 @@ export function App() {
     }
     return notes.filter((note) => note.relative_path.toLowerCase().includes(needle));
   }, [notes, search]);
+
+  const recipientsLabel =
+    status.selected_recipients.length === 0
+      ? "No recipients"
+      : `${status.selected_recipients.length} recipient${status.selected_recipients.length === 1 ? "" : "s"}`;
 
   async function withBusy<T>(label: string, work: () => Promise<T>) {
     setBusy(label);
@@ -340,159 +384,243 @@ export function App() {
     }
   }
 
+  async function handleTimeoutInputCommit() {
+    const trimmed = timeoutMinutesInput.trim();
+    const minutes = Number(trimmed);
+    if (!trimmed || Number.isNaN(minutes) || minutes < 1) {
+      setTimeoutMinutesInput(
+        status.inactivity_timeout_secs === 0
+          ? ""
+          : String(Math.max(1, Math.round(status.inactivity_timeout_secs / 60))),
+      );
+      return;
+    }
+
+    await handlePreferenceChange({ inactivity_timeout_secs: minutes * 60 });
+  }
+
+  async function handleAutoLockToggle(enabled: boolean) {
+    if (!enabled) {
+      setTimeoutMinutesInput("");
+      await handlePreferenceChange({ inactivity_timeout_secs: 0 });
+      return;
+    }
+
+    const nextMinutes = Number(timeoutMinutesInput.trim());
+    const safeMinutes = Number.isNaN(nextMinutes) || nextMinutes < 1 ? 15 : nextMinutes;
+    setTimeoutMinutesInput(String(safeMinutes));
+    await handlePreferenceChange({ inactivity_timeout_secs: safeMinutes * 60 });
+  }
+
   return (
     <div className="min-h-screen surface-grid">
-      <div className="container py-6">
-        <div className="space-y-6">
-          <Card className="overflow-hidden border-white/10 bg-card/70">
-            <CardContent className="grid gap-6 p-6 lg:grid-cols-[1.4fr_0.9fr]">
-              <div className="space-y-4">
-                <Badge variant="secondary" className="w-fit rounded-full px-3 py-1 text-xs">
-                  Secure Workspace
-                </Badge>
-                <div className="space-y-2">
-                  <h1 className="text-4xl font-semibold tracking-tight sm:text-5xl">
-                    encryptKeeper
-                  </h1>
-                  <p className="max-w-2xl text-sm text-muted-foreground sm:text-base">
-                    Encrypted note vault management with OpenPGP keys, session controls, and a
-                    focused editor designed for desktop use.
-                  </p>
+      <div className="container max-w-6xl py-4">
+        <div className="space-y-4">
+          <Card className="border-white/10 bg-card/75">
+            <CardContent className="flex flex-col gap-4 p-4">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <h1 className="text-2xl font-semibold tracking-tight">encryptKeeper</h1>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <Badge variant="outline">{backendMode === "tauri" ? "Tauri Mode" : "Mock Mode"}</Badge>
-                  <Badge variant={status.session_unlocked ? "default" : "secondary"}>
-                    {status.session_unlocked ? "Session unlocked" : "Session locked"}
-                  </Badge>
-                  <Badge variant="outline">
-                    {status.vault_kind === "none" ? "No vault open" : `${status.vault_kind} vault`}
-                  </Badge>
+                  <Button size="sm" onClick={() => void handleOpenFolder()}>
+                    <FolderOpen className="h-4 w-4" />
+                    Open Vault
+                  </Button>
+                  <Button size="sm" variant="secondary" onClick={() => void handleImportKey()}>
+                    <FileKey className="h-4 w-4" />
+                    Import Keys
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => void handleUnlock()}
+                    disabled={!status.selected_private_key || !passphrase}
+                  >
+                    <Unlock className="h-4 w-4" />
+                    Unlock
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => void lockSession().then(refreshStatus)}>
+                    <Lock className="h-4 w-4" />
+                    Lock
+                  </Button>
                 </div>
               </div>
 
-              <div className="flex flex-wrap items-start justify-start gap-3 lg:justify-end">
-                <Button onClick={() => void handleOpenFolder()}>
-                  <FolderOpen className="h-4 w-4" />
-                  Open Vault
-                </Button>
-                <Button variant="secondary" onClick={() => void handleImportKey()}>
-                  <FileKey className="h-4 w-4" />
-                  Import Key
-                </Button>
-                <Button
-                  variant="secondary"
-                  onClick={() => void handleUnlock()}
-                  disabled={!status.selected_private_key || !passphrase}
-                >
-                  <Unlock className="h-4 w-4" />
-                  Unlock
-                </Button>
-                <Button variant="ghost" onClick={() => void lockSession().then(refreshStatus)}>
-                  <Lock className="h-4 w-4" />
-                  Lock
-                </Button>
+              <div className="flex flex-wrap gap-2">
+                <Badge variant={status.session_unlocked ? "default" : "secondary"}>
+                  {status.session_unlocked ? "Unlocked" : "Locked"}
+                </Badge>
+                <Badge variant="outline">
+                  {status.vault_path ? activeVaultLabel(status.vault_kind) : "No vault"}
+                </Badge>
+                <Badge variant="outline">{notes.length} notes</Badge>
+                <Badge variant="outline">{recipientsLabel}</Badge>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
+                <div className="space-y-3">
+                  <Input
+                    type="password"
+                    value={passphrase}
+                    onChange={(event) => setPassphrase(event.target.value)}
+                    placeholder="Private key passphrase"
+                  />
+                  <div className="flex items-center gap-3 rounded-lg border border-border/70 bg-background/40 px-3 py-2 text-xs text-muted-foreground">
+                    <span className="truncate">
+                      {status.selected_private_key
+                        ? `Active key ${formatFingerprint(status.selected_private_key)}`
+                        : "No private key selected"}
+                    </span>
+                  </div>
+                </div>
+                <div className="rounded-lg border border-border/70 bg-background/40 px-3 py-2">
+                  <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
+                    Auto-Lock Timer
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      className="h-8"
+                      type="number"
+                      min={1}
+                      step={1}
+                      disabled={status.inactivity_timeout_secs === 0}
+                      value={timeoutMinutesInput}
+                      placeholder="Minutes"
+                      onChange={(event) => setTimeoutMinutesInput(event.target.value)}
+                      onBlur={() => void handleTimeoutInputCommit()}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          void handleTimeoutInputCommit();
+                        }
+                      }}
+                    />
+                    <span className="text-xs text-muted-foreground">min</span>
+                    <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <Switch
+                        checked={status.inactivity_timeout_secs !== 0}
+                        onCheckedChange={(checked) => void handleAutoLockToggle(checked)}
+                      />
+                      On
+                    </label>
+                  </div>
+                  <div className="mt-2 text-xs text-muted-foreground">
+                    {formatCountdown(
+                      countdownSecs,
+                      status.session_unlocked,
+                      status.inactivity_timeout_secs,
+                    )}
+                  </div>
+                </div>
               </div>
             </CardContent>
           </Card>
 
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-            <StatCard
-              label="Vault"
-              value={status.vault_path ? "Connected" : "Detached"}
-              caption={status.vault_path ?? "Open a folder vault to load .gpg notes."}
-            />
-            <StatCard
-              label="Notes"
-              value={notes.length}
-              caption={filteredNotes.length === notes.length ? "Visible in current view" : `${filteredNotes.length} notes match search`}
-            />
-            <StatCard
-              label="Recipients"
-              value={status.selected_recipients.length}
-              caption={`${keys.filter((key) => key.has_secret).length} private keys available`}
-            />
-            <StatCard
-              label="Timeout"
-              value={formatTimeout(status.inactivity_timeout_secs)}
-              caption={status.auto_save ? "Auto-save enabled" : "Manual save mode"}
-            />
-          </div>
-
-          <div className="space-y-3">
+          <div className="space-y-2">
             {status.session_unlocked ? (
-              <Card className="border-amber-500/25 bg-amber-500/10">
-                <CardContent className="flex items-center gap-3 p-4 text-sm text-amber-100">
+              <Card className="border-amber-500/20 bg-amber-500/8">
+                <CardContent className="flex items-center gap-2 p-3 text-sm text-amber-100">
                   <Shield className="h-4 w-4" />
-                  Vault is unlocked. Plaintext is currently resident in memory for this session.
+                  Vault is unlocked for this session.
                 </CardContent>
               </Card>
             ) : null}
             {backendMode === "mock" ? (
-              <Card className="border-white/10 bg-muted/40">
-                <CardContent className="p-4 text-sm text-muted-foreground">
-                  Browser mock mode is active. This is for workflow testing only and does not use
-                  real encryption or filesystem access.
+              <Card className="border-white/10 bg-muted/30">
+                <CardContent className="p-3 text-sm text-muted-foreground">
+                  Mock mode is active. No real encryption or file access is happening.
                 </CardContent>
               </Card>
             ) : null}
             {error ? (
-              <Card className="border-red-500/25 bg-red-500/10">
-                <CardContent className="p-4 text-sm text-red-100">{error}</CardContent>
+              <Card className="border-red-500/20 bg-red-500/10">
+                <CardContent className="p-3 text-sm text-red-100">{error}</CardContent>
               </Card>
             ) : null}
           </div>
 
-          <div className="grid gap-4 xl:grid-cols-[360px_360px_minmax(0,1fr)]">
-            <div className="space-y-4">
-              <Card className="border-white/10 bg-card/70">
-                <CardHeader className="space-y-2">
+          <div className="grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
+            <aside className="space-y-4">
+              <Card className="border-white/10 bg-card/75">
+                <CardHeader className="space-y-3 pb-3">
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <CardDescription>Session</CardDescription>
-                      <CardTitle>Vault controls</CardTitle>
+                      <CardTitle className="text-base">Notes</CardTitle>
+                      <CardDescription>Vault contents</CardDescription>
                     </div>
-                    <Badge variant="outline">{busy ?? "Idle"}</Badge>
-                  </div>
-                </CardHeader>
-                <CardContent className="space-y-5">
-                  <div className="grid gap-3">
-                    <div className="rounded-xl border border-border/70 bg-background/40 p-4">
-                      <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-                        Vault type
-                      </div>
-                      <div className="mt-2 font-medium">{status.vault_kind}</div>
-                    </div>
-                    <div className="rounded-xl border border-border/70 bg-background/40 p-4">
-                      <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-                        Active key
-                      </div>
-                      <div className="mt-2 font-medium">
-                        {status.selected_private_key
-                          ? formatFingerprint(status.selected_private_key)
-                          : "No private key selected"}
-                      </div>
+                    <div className="flex gap-1">
+                      <Button variant="ghost" size="icon" onClick={() => void refreshNotes()}>
+                        <RefreshCcw className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => void handleCreate()}
+                        disabled={status.vault_kind === "none"}
+                      >
+                        <NotebookPen className="h-4 w-4" />
+                        New
+                      </Button>
                     </div>
                   </div>
-
-                  <div className="space-y-2">
-                    <label className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-                      Unlock passphrase
-                    </label>
+                  <div className="relative">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                     <Input
-                      type="password"
-                      value={passphrase}
-                      onChange={(event) => setPassphrase(event.target.value)}
-                      placeholder="Private key passphrase"
+                      className="h-9 pl-9"
+                      type="search"
+                      value={search}
+                      placeholder="Search notes"
+                      onChange={(event) => setSearch(event.target.value)}
                     />
                   </div>
+                </CardHeader>
+                <CardContent className="pt-0">
+                  <ScrollArea className="h-[280px] pr-3">
+                    <div className="space-y-2">
+                      {filteredNotes.length === 0 ? (
+                        <div className="rounded-lg border border-dashed border-border p-3 text-sm text-muted-foreground">
+                          No notes found.
+                        </div>
+                      ) : (
+                        filteredNotes.map((note) => (
+                          <button
+                            key={note.id}
+                            className={cn(
+                              "w-full rounded-lg border px-3 py-3 text-left transition-colors",
+                              selectedNote?.id === note.id
+                                ? "border-primary/40 bg-primary/10"
+                                : "border-border/70 bg-background/40 hover:bg-accent",
+                            )}
+                            onClick={() => void handleSelectNote(note)}
+                          >
+                            <div className="truncate text-sm font-medium">{note.name}</div>
+                            <div className="mt-1 truncate text-xs text-muted-foreground">
+                              {note.relative_path}
+                            </div>
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  </ScrollArea>
+                </CardContent>
+              </Card>
 
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between gap-3 rounded-xl border border-border/70 bg-background/40 p-4">
+              <Card className="border-white/10 bg-card/75">
+                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
+                  <div>
+                    <CardTitle className="text-base">Keys & Preferences</CardTitle>
+                    <CardDescription>Compact session controls</CardDescription>
+                  </div>
+                  <Button variant="ghost" size="icon" onClick={() => void refreshKeys()}>
+                    <RefreshCcw className="h-4 w-4" />
+                  </Button>
+                </CardHeader>
+                <CardContent className="space-y-4 pt-0">
+                  <div className="grid gap-2">
+                    <div className="flex items-center justify-between rounded-lg border border-border/70 bg-background/40 px-3 py-2">
                       <div>
                         <div className="text-sm font-medium">Recursive scan</div>
-                        <div className="text-sm text-muted-foreground">
-                          Include nested folders when loading notes.
-                        </div>
+                        <div className="text-xs text-muted-foreground">Scan nested folders</div>
                       </div>
                       <Switch
                         checked={status.recursive_scan}
@@ -501,12 +629,10 @@ export function App() {
                         }
                       />
                     </div>
-                    <div className="flex items-center justify-between gap-3 rounded-xl border border-border/70 bg-background/40 p-4">
+                    <div className="flex items-center justify-between rounded-lg border border-border/70 bg-background/40 px-3 py-2">
                       <div>
                         <div className="text-sm font-medium">Auto-save</div>
-                        <div className="text-sm text-muted-foreground">
-                          Write encrypted content automatically after idle.
-                        </div>
+                        <div className="text-xs text-muted-foreground">Save after idle</div>
                       </div>
                       <Switch
                         checked={status.auto_save}
@@ -517,62 +643,35 @@ export function App() {
                     </div>
                   </div>
 
-                  <div className="space-y-2">
-                    <label className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-                      Inactivity timeout (seconds)
-                    </label>
-                    <Input
-                      type="number"
-                      min={60}
-                      step={60}
-                      value={status.inactivity_timeout_secs}
-                      onChange={(event) =>
-                        void handlePreferenceChange({
-                          inactivity_timeout_secs: Number(event.target.value),
-                        })
-                      }
-                    />
-                  </div>
-                </CardContent>
-              </Card>
-
-              <Card className="border-white/10 bg-card/70">
-                <CardHeader className="flex flex-row items-center justify-between space-y-0">
-                  <div>
-                    <CardDescription>Keyring</CardDescription>
-                    <CardTitle>Recipients and decrypt keys</CardTitle>
-                  </div>
-                  <Button variant="ghost" size="icon" onClick={() => void refreshKeys()}>
-                    <RefreshCcw className="h-4 w-4" />
-                  </Button>
-                </CardHeader>
-                <CardContent className="pt-0">
-                  <ScrollArea className="h-[420px] pr-3">
-                    <div className="space-y-3">
+                  <ScrollArea className="h-[280px] pr-3">
+                    <div className="space-y-2">
                       {keys.length === 0 ? (
-                        <div className="rounded-xl border border-dashed border-border p-4 text-sm text-muted-foreground">
+                        <div className="rounded-lg border border-dashed border-border p-3 text-sm text-muted-foreground">
                           No keys imported yet.
                         </div>
                       ) : (
                         keys.map((key) => (
                           <div
                             key={key.fingerprint}
-                            className="space-y-3 rounded-xl border border-border/70 bg-background/40 p-4"
+                            className="space-y-2 rounded-lg border border-border/70 bg-background/40 p-3"
                           >
-                            <div className="flex items-start justify-between gap-3">
-                              <div className="space-y-1">
-                                <div className="font-medium">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="truncate text-sm font-medium">
                                   {key.user_ids[0] ?? "Unnamed key"}
                                 </div>
-                                <code className="text-xs text-muted-foreground">
+                                <code className="truncate text-xs text-muted-foreground">
                                   {formatFingerprint(key.fingerprint)}
                                 </code>
                               </div>
-                              <Badge variant={key.has_secret ? "default" : "secondary"}>
-                                {key.has_secret ? "Private available" : "Public only"}
+                              <Badge
+                                variant={key.has_secret ? "default" : "secondary"}
+                                className="shrink-0"
+                              >
+                                {key.has_secret ? "Private" : "Public"}
                               </Badge>
                             </div>
-                            <label className="flex items-center gap-3 text-sm">
+                            <label className="flex items-center gap-2 text-xs text-muted-foreground">
                               <input
                                 type="radio"
                                 name="private-key"
@@ -582,15 +681,12 @@ export function App() {
                               />
                               Use for decryption
                             </label>
-                            <label className="flex items-center gap-3 text-sm">
+                            <label className="flex items-center gap-2 text-xs text-muted-foreground">
                               <input
                                 type="checkbox"
                                 checked={key.is_selected_recipient}
                                 onChange={(event) =>
-                                  void handleRecipientSelection(
-                                    key.fingerprint,
-                                    event.target.checked,
-                                  )
+                                  void handleRecipientSelection(key.fingerprint, event.target.checked)
                                 }
                               />
                               Encrypt to recipient
@@ -602,111 +698,47 @@ export function App() {
                   </ScrollArea>
                 </CardContent>
               </Card>
-            </div>
+            </aside>
 
-            <Card className="border-white/10 bg-card/70">
-              <CardHeader className="space-y-4">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <CardDescription>Vault contents</CardDescription>
-                    <CardTitle>Notes</CardTitle>
+            <Card className="border-white/10 bg-card/75 lg:flex lg:min-h-[calc(100vh-12rem)] lg:flex-col">
+              <CardHeader className="space-y-3 pb-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <CardTitle className="truncate text-base">
+                      {selectedNote?.relative_path ?? "Editor"}
+                    </CardTitle>
+                    <CardDescription>{dirty ? "Unsaved changes" : busy ?? "Ready"}</CardDescription>
                   </div>
-                  <div className="flex gap-2">
-                    <Button variant="ghost" size="icon" onClick={() => void refreshNotes()}>
-                      <RefreshCcw className="h-4 w-4" />
+                  <div className="flex flex-wrap gap-2">
+                    <Button size="sm" onClick={() => void handleSave()} disabled={!dirty || !selectedNote}>
+                      <Save className="h-4 w-4" />
+                      Save
                     </Button>
                     <Button
+                      size="sm"
                       variant="secondary"
-                      onClick={() => void handleCreate()}
-                      disabled={status.vault_kind === "none"}
+                      onClick={() => void handleRename()}
+                      disabled={!selectedNote}
                     >
-                      <NotebookPen className="h-4 w-4" />
-                      New note
+                      Rename
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => void handleDelete()}
+                      disabled={!selectedNote}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                      Delete
                     </Button>
                   </div>
                 </div>
-
-                <div className="relative">
-                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    className="pl-9"
-                    type="search"
-                    value={search}
-                    placeholder="Find by name or path"
-                    onChange={(event) => setSearch(event.target.value)}
-                  />
-                </div>
               </CardHeader>
-              <CardContent className="pt-0">
-                <ScrollArea className="h-[640px] pr-3">
-                  <div className="space-y-3">
-                    {filteredNotes.length === 0 ? (
-                      <div className="rounded-xl border border-dashed border-border p-4 text-sm text-muted-foreground">
-                        No notes match the current filter.
-                      </div>
-                    ) : (
-                      filteredNotes.map((note) => (
-                        <button
-                          key={note.id}
-                          className={cn(
-                            "w-full rounded-xl border p-4 text-left transition-colors",
-                            selectedNote?.id === note.id
-                              ? "border-primary/40 bg-primary/10"
-                              : "border-border/70 bg-background/40 hover:bg-accent",
-                          )}
-                          onClick={() => void handleSelectNote(note)}
-                        >
-                          <div className="font-medium">{note.name}</div>
-                          <div className="mt-1 text-sm text-muted-foreground">
-                            {note.relative_path}
-                          </div>
-                        </button>
-                      ))
-                    )}
-                  </div>
-                </ScrollArea>
-              </CardContent>
-            </Card>
-
-            <Card className="border-white/10 bg-card/70">
-              <CardHeader className="space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <CardDescription>Editor</CardDescription>
-                    <CardTitle>{selectedNote?.relative_path ?? "No note selected"}</CardTitle>
-                  </div>
-                  <Badge variant={dirty ? "default" : "outline"}>
-                    {dirty ? "Unsaved changes" : busy ?? "Ready"}
-                  </Badge>
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                  <Button onClick={() => void handleSave()} disabled={!dirty || !selectedNote}>
-                    <Save className="h-4 w-4" />
-                    Save
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    onClick={() => void handleRename()}
-                    disabled={!selectedNote}
-                  >
-                    Rename
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    onClick={() => void handleDelete()}
-                    disabled={!selectedNote}
-                  >
-                    <Trash2 className="h-4 w-4" />
-                    Delete
-                  </Button>
-                </div>
-              </CardHeader>
-              <CardContent className="pt-0">
+              <CardContent className="pt-0 lg:flex lg:flex-1 lg:flex-col">
                 <Textarea
-                  className="min-h-[640px] rounded-2xl bg-background/70 font-mono text-sm leading-7"
+                  className="min-h-[680px] rounded-xl bg-background/70 font-mono text-sm leading-6 lg:min-h-0 lg:flex-1"
                   value={editorValue}
-                  placeholder="Open or create a .gpg note to edit plaintext markdown-friendly text here."
+                  placeholder="Open or create a note to edit plaintext content here."
                   onChange={(event) => {
                     setEditorValue(event.target.value);
                     setDirty(true);

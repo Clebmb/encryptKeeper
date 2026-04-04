@@ -31,6 +31,7 @@ pub fn get_status(state: State<'_, AppState>) -> AppResult<SessionStatus> {
         selected_private_key: keys.selected_private_key(),
         selected_recipients: keys.selected_recipients(),
         inactivity_timeout_secs: session.timeout_secs(),
+        remaining_auto_lock_secs: session.remaining_timeout_secs(),
         recursive_scan: session.recursive_scan(),
         auto_save: session.auto_save(),
     })
