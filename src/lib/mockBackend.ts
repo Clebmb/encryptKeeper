@@ -145,6 +145,26 @@ export async function saveNote(noteId: string, content: string): Promise<void> {
   }));
 }
 
+export async function previewPgpBlock(content: string): Promise<string> {
+  const store = getStore();
+  if (!store.status.session_unlocked) {
+    throw new Error("Session is locked. Unlock the mock session first.");
+  }
+  if (store.status.selected_recipients.length === 0) {
+    throw new Error("Select at least one recipient first.");
+  }
+
+  const body = btoa(unescape(encodeURIComponent(content || ""))).replace(/(.{64})/g, "$1\n");
+  return [
+    "-----BEGIN PGP MESSAGE-----",
+    "",
+    "Version: encryptKeeper mock",
+    "",
+    body || "=",
+    "-----END PGP MESSAGE-----",
+  ].join("\n");
+}
+
 export async function createNote(name: string, content: string): Promise<NoteSummary> {
   const normalized = normalizeNoteName(name);
   const created: MockNoteRecord = {
@@ -211,6 +231,29 @@ export async function importKey(path: string): Promise<void> {
   }));
 }
 
+export async function createKey(name: string, email: string, _passphrase: string): Promise<void> {
+  const trimmedName = name.trim();
+  const trimmedEmail = email.trim();
+  if (!trimmedName || !trimmedEmail) {
+    throw new Error("Name and email are required.");
+  }
+
+  const fingerprint = `MOCK-${crypto.randomUUID().slice(0, 8)}-${crypto.randomUUID().slice(0, 8)}`.toUpperCase();
+  updateStore((current) => ({
+    ...current,
+    keys: [
+      ...current.keys,
+      {
+        fingerprint,
+        user_ids: [`${trimmedName} <${trimmedEmail}>`],
+        has_secret: true,
+        is_selected_private: false,
+        is_selected_recipient: false,
+      },
+    ],
+  }));
+}
+
 export async function listKeys(): Promise<KeySummary[]> {
   return getStore().keys;
 }
@@ -221,6 +264,35 @@ export async function selectPrivateKey(fingerprint: string): Promise<void> {
     status: {
       ...current.status,
       selected_private_key: fingerprint,
+    },
+  }));
+}
+
+export async function exportPublicKey(_fingerprint: string, _outputPath: string): Promise<void> {
+  return;
+}
+
+export async function exportPrivateKey(
+  _fingerprint: string,
+  _passphrase: string,
+  _outputPath: string,
+): Promise<void> {
+  return;
+}
+
+export async function removeKey(fingerprint: string): Promise<void> {
+  updateStore((current) => ({
+    ...current,
+    keys: current.keys.filter((key) => key.fingerprint !== fingerprint),
+    status: {
+      ...current.status,
+      selected_private_key:
+        current.status.selected_private_key === fingerprint
+          ? null
+          : current.status.selected_private_key,
+      selected_recipients: current.status.selected_recipients.filter(
+        (value) => value !== fingerprint,
+      ),
     },
   }));
 }

@@ -28,6 +28,8 @@ async function invokeOrMock<T>(command: string, args?: Record<string, unknown>):
           String(args?.noteId ?? args?.note_id ?? ""),
           String(args?.content ?? ""),
         ) as Promise<T>;
+      case "preview_pgp_block":
+        return mockBackend.previewPgpBlock(String(args?.content ?? "")) as Promise<T>;
       case "create_note":
         return mockBackend.createNote(
           String(args?.name ?? ""),
@@ -42,10 +44,29 @@ async function invokeOrMock<T>(command: string, args?: Record<string, unknown>):
         return mockBackend.deleteNote(String(args?.noteId ?? args?.note_id ?? "")) as Promise<T>;
       case "import_key_from_file":
         return mockBackend.importKey(String(args?.path ?? "")) as Promise<T>;
+      case "create_key":
+        return mockBackend.createKey(
+          String(args?.name ?? ""),
+          String(args?.email ?? ""),
+          String(args?.passphrase ?? ""),
+        ) as Promise<T>;
       case "list_keys":
         return mockBackend.listKeys() as Promise<T>;
       case "select_private_key":
         return mockBackend.selectPrivateKey(String(args?.fingerprint ?? "")) as Promise<T>;
+      case "export_public_key":
+        return mockBackend.exportPublicKey(
+          String(args?.fingerprint ?? ""),
+          String(args?.outputPath ?? args?.output_path ?? ""),
+        ) as Promise<T>;
+      case "export_private_key":
+        return mockBackend.exportPrivateKey(
+          String(args?.fingerprint ?? ""),
+          String(args?.passphrase ?? ""),
+          String(args?.outputPath ?? args?.output_path ?? ""),
+        ) as Promise<T>;
+      case "remove_key":
+        return mockBackend.removeKey(String(args?.fingerprint ?? "")) as Promise<T>;
       case "set_recipients":
         return mockBackend.setRecipients((args?.fingerprints as string[]) ?? []) as Promise<T>;
       case "unlock_session":
@@ -88,6 +109,10 @@ export async function saveNote(noteId: string, content: string): Promise<void> {
   return invokeOrMock("save_note", { noteId, content });
 }
 
+export async function previewPgpBlock(content: string): Promise<string> {
+  return invokeOrMock("preview_pgp_block", { content });
+}
+
 export async function createNote(name: string, content: string): Promise<NoteSummary> {
   return invokeOrMock("create_note", { name, content });
 }
@@ -104,12 +129,32 @@ export async function importKey(path: string): Promise<void> {
   return invokeOrMock("import_key_from_file", { path });
 }
 
+export async function createKey(name: string, email: string, passphrase: string): Promise<void> {
+  return invokeOrMock("create_key", { name, email, passphrase });
+}
+
 export async function listKeys(): Promise<KeySummary[]> {
   return invokeOrMock("list_keys");
 }
 
 export async function selectPrivateKey(fingerprint: string): Promise<void> {
   return invokeOrMock("select_private_key", { fingerprint });
+}
+
+export async function exportPublicKey(fingerprint: string, outputPath: string): Promise<void> {
+  return invokeOrMock("export_public_key", { fingerprint, outputPath });
+}
+
+export async function exportPrivateKey(
+  fingerprint: string,
+  passphrase: string,
+  outputPath: string,
+): Promise<void> {
+  return invokeOrMock("export_private_key", { fingerprint, passphrase, outputPath });
+}
+
+export async function removeKey(fingerprint: string, hasSecret: boolean): Promise<void> {
+  return invokeOrMock("remove_key", { fingerprint, hasSecret });
 }
 
 export async function setRecipients(fingerprints: string[]): Promise<void> {

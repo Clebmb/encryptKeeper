@@ -28,6 +28,13 @@ impl KeyManager {
         Ok(())
     }
 
+    pub fn remove_key(&mut self, fingerprint: &str) {
+        if self.selected_private_key.as_deref() == Some(fingerprint) {
+            self.selected_private_key = None;
+        }
+        self.selected_recipients.remove(fingerprint);
+    }
+
     pub fn map_keys(&self, mut keys: Vec<KeySummary>) -> Vec<KeySummary> {
         for key in &mut keys {
             key.is_selected_private = self

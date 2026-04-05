@@ -107,6 +107,21 @@ pub fn save_note(note_id: String, content: String, state: State<'_, AppState>) -
 }
 
 #[tauri::command]
+pub fn preview_pgp_block(content: String, state: State<'_, AppState>) -> AppResult<String> {
+    let mut session = state
+        .session
+        .write()
+        .map_err(|_| AppError::External("session lock poisoned".into()))?;
+    session.ensure_unlocked()?;
+    let recipients = state
+        .keys
+        .read()
+        .map_err(|_| AppError::External("key manager lock poisoned".into()))?
+        .selected_recipients();
+    state.crypto.encrypt_text_to_armor(&recipients, &content)
+}
+
+#[tauri::command]
 pub fn create_note(
     name: String,
     content: String,
@@ -161,6 +176,16 @@ pub fn import_key_from_file(path: String, state: State<'_, AppState>) -> AppResu
 }
 
 #[tauri::command]
+pub fn create_key(
+    name: String,
+    email: String,
+    passphrase: String,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    state.crypto.create_key(&name, &email, &passphrase)
+}
+
+#[tauri::command]
 pub fn list_keys(state: State<'_, AppState>) -> AppResult<Vec<KeySummary>> {
     let public_listing = state.crypto.list_keys(false)?;
     let secret_listing = state.crypto.list_keys(true)?;
@@ -179,6 +204,44 @@ pub fn select_private_key(fingerprint: String, state: State<'_, AppState>) -> Ap
         .write()
         .map_err(|_| AppError::External("key manager lock poisoned".into()))?;
     keys.select_private_key(fingerprint);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn export_public_key(
+    fingerprint: String,
+    output_path: String,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    state
+        .crypto
+        .export_public_key(&fingerprint, PathBuf::from(output_path).as_path())
+}
+
+#[tauri::command]
+pub fn export_private_key(
+    fingerprint: String,
+    passphrase: String,
+    output_path: String,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    state
+        .crypto
+        .export_secret_key(&fingerprint, &passphrase, PathBuf::from(output_path).as_path())
+}
+
+#[tauri::command]
+pub fn remove_key(
+    fingerprint: String,
+    has_secret: bool,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    state.crypto.delete_key(&fingerprint, has_secret)?;
+    let mut keys = state
+        .keys
+        .write()
+        .map_err(|_| AppError::External("key manager lock poisoned".into()))?;
+    keys.remove_key(&fingerprint);
     Ok(())
 }
 
