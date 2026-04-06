@@ -19,6 +19,7 @@ pub fn run() {
             commands::list_notes,
             commands::refresh_notes,
             commands::open_note,
+            commands::resolve_clipboard_note_content,
             commands::save_note,
             commands::preview_pgp_block,
             commands::inspect_note_encryption,

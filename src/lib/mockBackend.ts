@@ -26,7 +26,7 @@ const defaultStatus: SessionStatus = {
   session_unlocked: false,
   selected_private_key: null,
   selected_recipients: [],
-  inactivity_timeout_secs: 900,
+  inactivity_timeout_secs: 0,
   remaining_auto_lock_secs: null,
   recursive_scan: true,
   auto_save: false,
@@ -146,6 +146,39 @@ export async function openNote(noteId: string): Promise<OpenNoteResult> {
     note,
     content: note.content,
   };
+}
+
+export async function resolveClipboardNoteContent(
+  rawContent: string,
+): Promise<{ content: string; was_decrypted: boolean }> {
+  const store = getStore();
+  if (
+    store.status.session_unlocked &&
+    store.status.selected_private_key &&
+    rawContent.includes("-----BEGIN PGP MESSAGE-----") &&
+    rawContent.includes("-----END PGP MESSAGE-----")
+  ) {
+    const lines = rawContent
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const body = lines.filter(
+      (line) =>
+        !line.startsWith("-----BEGIN PGP MESSAGE-----") &&
+        !line.startsWith("-----END PGP MESSAGE-----") &&
+        !line.startsWith("Version:"),
+    );
+    if (body.length > 0) {
+      try {
+        const decoded = decodeURIComponent(escape(atob(body.join(""))));
+        return { content: decoded, was_decrypted: true };
+      } catch {
+        return { content: rawContent, was_decrypted: false };
+      }
+    }
+  }
+
+  return { content: rawContent, was_decrypted: false };
 }
 
 export async function saveNote(noteId: string, content: string): Promise<void> {

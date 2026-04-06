@@ -51,4 +51,18 @@
     background-size: 36px 36px;
     background-position: center center;
   }
+
+  .key-identity-marquee:hover .key-identity-text[data-overflow="true"] {
+    animation: key-identity-scroll var(--key-scroll-duration, 6s) ease-in-out infinite alternate;
+  }
+}
+
+@keyframes key-identity-scroll {
+  from {
+    transform: translateX(0);
+  }
+
+  to {
+    transform: translateX(calc(var(--key-scroll-distance, 0px) * -1));
+  }
 }

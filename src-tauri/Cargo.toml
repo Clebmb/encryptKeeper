@@ -1,6 +1,6 @@
 [package]
 name = "encryptkeeper"
-version = "0.1.0"
+version = "0.1.2"
 description = "Secure desktop note vault for .gpg text files"
 authors = ["Codex"]
 edition = "2021"

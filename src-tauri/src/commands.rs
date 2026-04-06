@@ -5,7 +5,10 @@ use tauri::State;
 use crate::{
     app_state::AppState,
     errors::{AppError, AppResult},
-    models::{KeySummary, NoteEncryptionStatus, NoteRecipientInfo, OpenNoteResult, SessionStatus},
+    models::{
+        ClipboardNoteContent, KeySummary, NoteEncryptionStatus, NoteRecipientInfo, OpenNoteResult,
+        SessionStatus,
+    },
 };
 
 #[tauri::command]
@@ -92,6 +95,40 @@ pub fn open_note(note_id: String, state: State<'_, AppState>) -> AppResult<OpenN
     let path = vault.note_path(&note_id)?;
     let content = state.crypto.decrypt_file(&path, &passphrase)?;
     Ok(OpenNoteResult { note, content })
+}
+
+#[tauri::command]
+pub fn resolve_clipboard_note_content(
+    raw_content: String,
+    state: State<'_, AppState>,
+) -> AppResult<ClipboardNoteContent> {
+    let trimmed = raw_content.trim();
+    if !trimmed.contains("-----BEGIN PGP MESSAGE-----")
+        || !trimmed.contains("-----END PGP MESSAGE-----")
+    {
+        return Ok(ClipboardNoteContent {
+            content: raw_content,
+            was_decrypted: false,
+        });
+    }
+
+    let mut session = state
+        .session
+        .write()
+        .map_err(|_| AppError::External("session lock poisoned".into()))?;
+    let passphrase = session.ensure_unlocked()?.to_string();
+
+    match state.crypto.decrypt_armored_text(&raw_content, &passphrase) {
+        Ok(content) => Ok(ClipboardNoteContent {
+            content,
+            was_decrypted: true,
+        }),
+        Err(AppError::MissingPrivateKey | AppError::InvalidGpgFile) => Ok(ClipboardNoteContent {
+            content: raw_content,
+            was_decrypted: false,
+        }),
+        Err(cause) => Err(cause),
+    }
 }
 
 #[tauri::command]

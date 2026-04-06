@@ -14,6 +14,12 @@ pub struct OpenNoteResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClipboardNoteContent {
+    pub content: String,
+    pub was_decrypted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NoteRecipientInfo {
     pub key_id: String,
     pub fingerprint: Option<String>,

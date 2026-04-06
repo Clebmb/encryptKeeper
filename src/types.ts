@@ -32,6 +32,11 @@ export interface OpenNoteResult {
   content: string;
 }
 
+export interface ClipboardNoteContent {
+  content: string;
+  was_decrypted: boolean;
+}
+
 export interface NoteRecipientInfo {
   key_id: string;
   fingerprint: string | null;

@@ -1,4 +1,5 @@
 import type {
+  ClipboardNoteContent,
   KeySummary,
   NoteEncryptionStatus,
   NoteSummary,
@@ -26,6 +27,10 @@ async function invokeOrMock<T>(command: string, args?: Record<string, unknown>):
         return mockBackend.refreshNotes() as Promise<T>;
       case "open_note":
         return mockBackend.openNote(String(args?.noteId ?? args?.note_id ?? "")) as Promise<T>;
+      case "resolve_clipboard_note_content":
+        return mockBackend.resolveClipboardNoteContent(
+          String(args?.rawContent ?? args?.raw_content ?? ""),
+        ) as Promise<T>;
       case "save_note":
         return mockBackend.saveNote(
           String(args?.noteId ?? args?.note_id ?? ""),
@@ -116,6 +121,10 @@ export async function refreshNotesFromVault(): Promise<NoteSummary[]> {
 
 export async function openNote(noteId: string): Promise<OpenNoteResult> {
   return invokeOrMock("open_note", { noteId });
+}
+
+export async function resolveClipboardNoteContent(rawContent: string): Promise<ClipboardNoteContent> {
+  return invokeOrMock("resolve_clipboard_note_content", { rawContent });
 }
 
 export async function saveNote(noteId: string, content: string): Promise<void> {

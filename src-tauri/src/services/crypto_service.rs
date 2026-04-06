@@ -205,6 +205,49 @@ impl CryptoService {
         Err(AppError::External(stderr.trim().to_string()))
     }
 
+    pub fn decrypt_armored_text(&self, armored_text: &str, passphrase: &str) -> AppResult<String> {
+        let mut child = self
+            .gpg_command()?
+            .args([
+                "--batch",
+                "--yes",
+                "--pinentry-mode",
+                "loopback",
+                "--passphrase-fd",
+                "0",
+                "--decrypt",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|_| AppError::GpgUnavailable)?;
+
+        if let Some(stdin) = &mut child.stdin {
+            use std::io::Write;
+            stdin.write_all(passphrase.as_bytes())?;
+            stdin.write_all(b"\n")?;
+            stdin.write_all(armored_text.as_bytes())?;
+        }
+
+        let output = child.wait_with_output()?;
+        if output.status.success() {
+            return String::from_utf8(output.stdout).map_err(Into::into);
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("Bad passphrase") {
+            return Err(AppError::WrongPrivateKeyPassphrase);
+        }
+        if stderr.contains("No secret key") {
+            return Err(AppError::MissingPrivateKey);
+        }
+        if stderr.contains("decryption failed") {
+            return Err(AppError::InvalidGpgFile);
+        }
+        Err(AppError::External(stderr.trim().to_string()))
+    }
+
     pub fn encrypt_text_to_file(
         &self,
         recipients: &[String],

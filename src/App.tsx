@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
   closestCenter,
   DndContext,
@@ -17,11 +17,14 @@ import { CSS } from "@dnd-kit/utilities";
 import {
   Settings,
   ArrowDownUp,
+  Clipboard,
+  Copy,
   FileKey,
   FolderOpen,
   GripVertical,
   Lock,
   NotebookPen,
+  Pin,
   Plus,
   RefreshCcw,
   Save,
@@ -77,6 +80,7 @@ import {
   openNote,
   previewPgpBlock,
   refreshNotesFromVault,
+  resolveClipboardNoteContent,
   removeKey,
   renameNote,
   saveNote,
@@ -96,7 +100,7 @@ const defaultStatus: SessionStatus = {
   session_unlocked: false,
   selected_private_key: null,
   selected_recipients: [],
-  inactivity_timeout_secs: 900,
+  inactivity_timeout_secs: 0,
   remaining_auto_lock_secs: null,
   recursive_scan: true,
   auto_save: false,
@@ -110,8 +114,38 @@ const defaultNoteEncryptionStatus: NoteEncryptionStatus = {
 
 const KEY_ORDER_STORAGE_KEY = "encryptkeeper.key-order";
 const HIDE_NOTE_NAMES_ON_LOCK_STORAGE_KEY = "encryptkeeper.hide-note-names-on-lock";
+const PINNED_PRIVATE_KEY_STORAGE_KEY = "encryptkeeper.pinned-private-key";
+const PINNED_RECIPIENTS_STORAGE_KEY = "encryptkeeper.pinned-recipients";
+const USE_CLIPBOARD_STORAGE_KEY = "encryptkeeper.use-clipboard";
 const AUTO_SHOW_RECIPIENTS_STORAGE_KEY = "encryptkeeper.auto-show-recipients";
 const AUTO_SHOW_PGP_BLOCK_STORAGE_KEY = "encryptkeeper.auto-show-pgp-block";
+
+function loadStoredString(key: string) {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    const value = window.localStorage.getItem(key);
+    return value && value.trim() ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function loadStoredStringArray(key: string) {
+  if (typeof window === "undefined") {
+    return [] as string[];
+  }
+
+  try {
+    const raw = window.localStorage.getItem(key);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : [];
+  } catch {
+    return [] as string[];
+  }
+}
 
 function formatFingerprint(fingerprint: string) {
   if (fingerprint.length <= 18) {
@@ -207,19 +241,99 @@ function keyFileStem(key: KeySummary) {
   return `${baseName || "key"}-${fingerprintTail}`;
 }
 
+function isEditableTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  if (target.isContentEditable) {
+    return true;
+  }
+
+  return Boolean(target.closest("input, textarea, [contenteditable='true']"));
+}
+
+function isPgpMessageBlock(value: string) {
+  return (
+    value.includes("-----BEGIN PGP MESSAGE-----") && value.includes("-----END PGP MESSAGE-----")
+  );
+}
+
+function isPgpKeyBlock(value: string) {
+  return (
+    (value.includes("-----BEGIN PGP PUBLIC KEY BLOCK-----") &&
+      value.includes("-----END PGP PUBLIC KEY BLOCK-----")) ||
+    (value.includes("-----BEGIN PGP PRIVATE KEY BLOCK-----") &&
+      value.includes("-----END PGP PRIVATE KEY BLOCK-----"))
+  );
+}
+
 interface SortableKeyCardProps {
   keyItem: KeySummary;
+  isPrivatePinned: boolean;
+  isRecipientPinned: boolean;
   onPrivateKeySelection: (fingerprint: string) => void;
   onRecipientSelection: (fingerprint: string, checked: boolean) => void;
+  onTogglePrivatePin: (key: KeySummary) => void;
+  onToggleRecipientPin: (key: KeySummary) => void;
   onExportPublic: (key: KeySummary) => void;
   onOpenExportDialog: (key: KeySummary, mode: "private" | "both") => void;
   onRemoveKey: (key: KeySummary) => void;
 }
 
+function KeyIdentityLabel({ value }: { value: string }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const textRef = useRef<HTMLSpanElement | null>(null);
+  const [scrollDistance, setScrollDistance] = useState(0);
+
+  useEffect(() => {
+    function measure() {
+      const container = containerRef.current;
+      const text = textRef.current;
+      if (!container || !text) {
+        return;
+      }
+
+      const nextDistance = Math.max(0, text.scrollWidth - container.clientWidth);
+      setScrollDistance(nextDistance);
+    }
+
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [value]);
+
+  return (
+    <div
+      ref={containerRef}
+      className="key-identity-marquee overflow-hidden text-sm font-medium"
+      title={value}
+    >
+      <span
+        ref={textRef}
+        data-overflow={scrollDistance > 0}
+        className="key-identity-text inline-block whitespace-nowrap"
+        style={
+          {
+            "--key-scroll-distance": `${scrollDistance}px`,
+            "--key-scroll-duration": `${Math.max(4, scrollDistance / 36)}s`,
+          } as CSSProperties
+        }
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
 function SortableKeyCard({
   keyItem,
+  isPrivatePinned,
+  isRecipientPinned,
   onPrivateKeySelection,
   onRecipientSelection,
+  onTogglePrivatePin,
+  onToggleRecipientPin,
   onExportPublic,
   onOpenExportDialog,
   onRemoveKey,
@@ -252,7 +366,7 @@ function SortableKeyCard({
         </button>
         <div className="min-w-0">
           <div className="flex flex-col gap-2">
-            <div className="truncate text-sm font-medium">{keyItem.user_ids[0] ?? "Unnamed key"}</div>
+            <KeyIdentityLabel value={keyItem.user_ids[0] ?? "Unnamed key"} />
             <code className="truncate text-xs text-muted-foreground">
               {formatFingerprint(keyItem.fingerprint)}
             </code>
@@ -276,24 +390,49 @@ function SortableKeyCard({
       </div>
       <div className="mt-2 grid gap-2">
         <div className="grid gap-2 text-xs text-muted-foreground">
-          <label className="flex items-center gap-2">
-            <input
-              type="radio"
-              name="private-key"
-              checked={keyItem.is_selected_private}
+          <div className="flex items-center justify-between gap-2">
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                name="private-key"
+                checked={keyItem.is_selected_private}
+                disabled={!keyItem.has_secret}
+                onChange={() => void onPrivateKeySelection(keyItem.fingerprint)}
+              />
+              Use to decrypt
+            </label>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="size-7 shrink-0"
               disabled={!keyItem.has_secret}
-              onChange={() => void onPrivateKeySelection(keyItem.fingerprint)}
-            />
-            Use to decrypt
-          </label>
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={keyItem.is_selected_recipient}
-              onChange={(event) => void onRecipientSelection(keyItem.fingerprint, event.target.checked)}
-            />
-            Encrypt to this key
-          </label>
+              onClick={() => void onTogglePrivatePin(keyItem)}
+              aria-label={isPrivatePinned ? "Unpin decrypt setting" : "Pin decrypt setting"}
+              title={isPrivatePinned ? "Unpin decrypt setting" : "Pin decrypt setting"}
+            >
+              <Pin className={cn("h-3.5 w-3.5", isPrivatePinned && "fill-white text-white")} />
+            </Button>
+          </div>
+          <div className="flex items-center justify-between gap-2">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={keyItem.is_selected_recipient}
+                onChange={(event) => void onRecipientSelection(keyItem.fingerprint, event.target.checked)}
+              />
+              Encrypt to this key
+            </label>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="size-7 shrink-0"
+              onClick={() => void onToggleRecipientPin(keyItem)}
+              aria-label={isRecipientPinned ? "Unpin recipient setting" : "Pin recipient setting"}
+              title={isRecipientPinned ? "Unpin recipient setting" : "Pin recipient setting"}
+            >
+              <Pin className={cn("h-3.5 w-3.5", isRecipientPinned && "fill-white text-white")} />
+            </Button>
+          </div>
         </div>
         <div>
           <DropdownMenu>
@@ -336,7 +475,7 @@ export function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [passphrase, setPassphrase] = useState("");
-  const [timeoutMinutesInput, setTimeoutMinutesInput] = useState("15");
+  const [timeoutMinutesInput, setTimeoutMinutesInput] = useState("");
   const [countdownSecs, setCountdownSecs] = useState<number | null>(null);
   const [isPgpPreviewOpen, setIsPgpPreviewOpen] = useState(false);
   const [pgpPreview, setPgpPreview] = useState("");
@@ -347,6 +486,9 @@ export function App() {
   );
   const [showRecipients, setShowRecipients] = useState(true);
   const [hideNoteNamesOnLock, setHideNoteNamesOnLock] = useState(() => loadHideNoteNamesOnLock());
+  const [useClipboard, setUseClipboard] = useState(() =>
+    loadStoredBoolean(USE_CLIPBOARD_STORAGE_KEY, true),
+  );
   const [autoShowRecipients, setAutoShowRecipients] = useState(() =>
     loadStoredBoolean(AUTO_SHOW_RECIPIENTS_STORAGE_KEY, false),
   );
@@ -357,13 +499,21 @@ export function App() {
   const [newKeyName, setNewKeyName] = useState("");
   const [newKeyEmail, setNewKeyEmail] = useState("");
   const [newKeyPassphrase, setNewKeyPassphrase] = useState("");
+  const [isCreatingKey, setIsCreatingKey] = useState(false);
   const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
   const [exportMode, setExportMode] = useState<"private" | "both">("private");
   const [exportTargetKey, setExportTargetKey] = useState<KeySummary | null>(null);
   const [exportPassphrase, setExportPassphrase] = useState("");
   const [keyOrder, setKeyOrder] = useState<string[]>(() => loadStoredKeyOrder());
+  const [pinnedPrivateKey, setPinnedPrivateKey] = useState<string | null>(() =>
+    loadStoredString(PINNED_PRIVATE_KEY_STORAGE_KEY),
+  );
+  const [pinnedRecipients, setPinnedRecipients] = useState<string[]>(() =>
+    loadStoredStringArray(PINNED_RECIPIENTS_STORAGE_KEY),
+  );
   const wasUnlockedRef = useRef(status.session_unlocked);
   const previewRequestRef = useRef(0);
+  const createKeyInFlightRef = useRef(false);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
 
   async function refreshStatus() {
@@ -445,11 +595,36 @@ export function App() {
     if (typeof window === "undefined") {
       return;
     }
+    if (pinnedPrivateKey) {
+      window.localStorage.setItem(PINNED_PRIVATE_KEY_STORAGE_KEY, pinnedPrivateKey);
+      return;
+    }
+    window.localStorage.removeItem(PINNED_PRIVATE_KEY_STORAGE_KEY);
+  }, [pinnedPrivateKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(PINNED_RECIPIENTS_STORAGE_KEY, JSON.stringify(pinnedRecipients));
+  }, [pinnedRecipients]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
     window.localStorage.setItem(
       HIDE_NOTE_NAMES_ON_LOCK_STORAGE_KEY,
       hideNoteNamesOnLock ? "true" : "false",
     );
   }, [hideNoteNamesOnLock]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(USE_CLIPBOARD_STORAGE_KEY, useClipboard ? "true" : "false");
+  }, [useClipboard]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -470,6 +645,64 @@ export function App() {
       autoShowPgpBlock ? "true" : "false",
     );
   }, [autoShowPgpBlock]);
+
+  useEffect(() => {
+    const availableFingerprints = new Set(keys.map((key) => key.fingerprint));
+    const sanitizedPinnedPrivate =
+      pinnedPrivateKey && availableFingerprints.has(pinnedPrivateKey) ? pinnedPrivateKey : null;
+    const sanitizedPinnedRecipients = pinnedRecipients.filter((fingerprint) =>
+      availableFingerprints.has(fingerprint),
+    );
+
+    if (sanitizedPinnedPrivate !== pinnedPrivateKey) {
+      setPinnedPrivateKey(sanitizedPinnedPrivate);
+      return;
+    }
+
+    if (
+      sanitizedPinnedRecipients.length !== pinnedRecipients.length ||
+      sanitizedPinnedRecipients.some((fingerprint, index) => fingerprint !== pinnedRecipients[index])
+    ) {
+      setPinnedRecipients(sanitizedPinnedRecipients);
+      return;
+    }
+
+    if (keys.length === 0) {
+      return;
+    }
+
+    const selectedPrivate = keys.find((key) => key.is_selected_private)?.fingerprint ?? null;
+    const selectedRecipients = keys
+      .filter((key) => key.is_selected_recipient)
+      .map((key) => key.fingerprint);
+
+    const missingPinnedPrivate =
+      Boolean(sanitizedPinnedPrivate) && selectedPrivate !== sanitizedPinnedPrivate;
+    const missingPinnedRecipients = sanitizedPinnedRecipients.filter(
+      (fingerprint) => !selectedRecipients.includes(fingerprint),
+    );
+
+    if (!missingPinnedPrivate && missingPinnedRecipients.length === 0) {
+      return;
+    }
+
+    void (async () => {
+      try {
+        if (sanitizedPinnedPrivate && selectedPrivate !== sanitizedPinnedPrivate) {
+          await selectPrivateKey(sanitizedPinnedPrivate);
+        }
+
+        if (missingPinnedRecipients.length > 0) {
+          const nextRecipients = [...new Set([...selectedRecipients, ...sanitizedPinnedRecipients])];
+          await setRecipients(nextRecipients);
+        }
+
+        await Promise.all([refreshKeys(), refreshStatus()]);
+      } catch {
+        return;
+      }
+    })();
+  }, [keys, pinnedPrivateKey, pinnedRecipients]);
 
   useEffect(() => {
     if (!status.auto_save || !dirty || !selectedNote || !status.session_unlocked) {
@@ -556,6 +789,44 @@ export function App() {
 
     return () => window.clearTimeout(timer);
   }, [editorValue, isPgpPreviewOpen, selectedNote, status.session_unlocked, status.selected_recipients]);
+
+  useEffect(() => {
+    if (!useClipboard) {
+      return;
+    }
+
+    function handlePaste(event: ClipboardEvent) {
+      if (isEditableTarget(event.target)) {
+        return;
+      }
+
+      const clipboardText = event.clipboardData?.getData("text") ?? "";
+      const trimmed = clipboardText.trim();
+      if (!trimmed) {
+        return;
+      }
+
+      const isRecognizedClipboardPayload =
+        isPgpKeyBlock(trimmed) ||
+        (isPgpMessageBlock(trimmed) && status.session_unlocked && Boolean(status.selected_private_key));
+      if (!isRecognizedClipboardPayload) {
+        return;
+      }
+
+      event.preventDefault();
+
+      void (async () => {
+        try {
+          await handleClipboardPasteAction(trimmed);
+        } catch (cause) {
+          setError(cause instanceof Error ? cause.message : String(cause));
+        }
+      })();
+    }
+
+    document.addEventListener("paste", handlePaste);
+    return () => document.removeEventListener("paste", handlePaste);
+  }, [backendMode, busy, status.selected_private_key, status.session_unlocked, useClipboard]);
 
   const filteredNotes = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -709,16 +980,41 @@ export function App() {
     setPgpPreviewError(null);
   }
 
+  async function handleCopyPgpPreview() {
+    if (!pgpPreview || pgpPreviewError) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(pgpPreview);
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
   async function handleCreateKey() {
-    await withBusy("Creating key...", async () => {
-      await createKey(newKeyName, newKeyEmail, newKeyPassphrase);
-      setIsCreateKeyOpen(false);
-      setNewKeyName("");
-      setNewKeyEmail("");
-      setNewKeyPassphrase("");
-      await refreshKeys();
-      await refreshStatus();
-    });
+    if (createKeyInFlightRef.current) {
+      return;
+    }
+
+    createKeyInFlightRef.current = true;
+    setIsCreatingKey(true);
+
+    try {
+      await withBusy("Creating key...", async () => {
+        await createKey(newKeyName, newKeyEmail, newKeyPassphrase);
+        setIsCreateKeyOpen(false);
+        setNewKeyName("");
+        setNewKeyEmail("");
+        setNewKeyPassphrase("");
+        await refreshKeys();
+        await refreshStatus();
+      });
+    } finally {
+      createKeyInFlightRef.current = false;
+      setIsCreatingKey(false);
+    }
   }
 
   async function handleExportPublic(key: KeySummary) {
@@ -803,6 +1099,82 @@ export function App() {
     });
   }
 
+  async function createNoteFromPreparedClipboard(content: string, busyLabel: string) {
+    const name = window.prompt("New note name");
+    if (!name) {
+      return;
+    }
+
+    const normalized = normalizeNoteName(name);
+    await withBusy(busyLabel.replace("{name}", normalized), async () => {
+      const created = await createNote(normalized, content);
+      await refreshNotes();
+      await handleSelectNote(created);
+    });
+  }
+
+  async function handleCreateFromClipboard() {
+    try {
+      setError(null);
+      const clipboardText = await navigator.clipboard.readText();
+      if (!clipboardText.trim()) {
+        throw new Error("Clipboard is empty.");
+      }
+
+      const prepared = await resolveClipboardNoteContent(clipboardText);
+      await createNoteFromPreparedClipboard(
+        prepared.content,
+        prepared.was_decrypted
+          ? "Creating {name} from decrypted clipboard message..."
+          : "Creating {name} from clipboard...",
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function handleClipboardPasteAction(clipboardText: string) {
+    const trimmed = clipboardText.trim();
+    if (!trimmed || busy) {
+      return false;
+    }
+
+    if (isPgpKeyBlock(trimmed)) {
+      const approved =
+        backendMode === "tauri"
+          ? await confirm("Import the OpenPGP key currently in your clipboard?", {
+              title: "Import clipboard key",
+              kind: "info",
+            })
+          : window.confirm("Import the OpenPGP key currently in your clipboard?");
+      if (!approved) {
+        return true;
+      }
+
+      await withBusy("Importing key from clipboard...", async () => {
+        await importKeyText(trimmed);
+        await refreshKeys();
+        await refreshStatus();
+      });
+      return true;
+    }
+
+    if (!isPgpMessageBlock(trimmed) || !status.session_unlocked || !status.selected_private_key) {
+      return false;
+    }
+
+    const prepared = await resolveClipboardNoteContent(trimmed);
+    if (!prepared.was_decrypted) {
+      return false;
+    }
+
+    await createNoteFromPreparedClipboard(
+      prepared.content,
+      "Creating {name} from decrypted clipboard message...",
+    );
+    return true;
+  }
+
   async function handleRename() {
     if (!selectedNote) {
       return;
@@ -845,6 +1217,10 @@ export function App() {
   }
 
   async function handlePrivateKeySelection(fingerprint: string) {
+    if (pinnedPrivateKey && pinnedPrivateKey !== fingerprint) {
+      setPinnedPrivateKey(null);
+    }
+
     await withBusy("Selecting private key...", async () => {
       await selectPrivateKey(fingerprint);
       await refreshKeys();
@@ -853,6 +1229,10 @@ export function App() {
   }
 
   async function handleRecipientSelection(fingerprint: string, checked: boolean) {
+    if (!checked && pinnedRecipients.includes(fingerprint)) {
+      setPinnedRecipients((current) => current.filter((value) => value !== fingerprint));
+    }
+
     const next = checked
       ? [...status.selected_recipients, fingerprint]
       : status.selected_recipients.filter((value) => value !== fingerprint);
@@ -885,6 +1265,36 @@ export function App() {
     );
   }
 
+  async function handleTogglePrivatePin(key: KeySummary) {
+    if (!key.has_secret) {
+      return;
+    }
+
+    if (pinnedPrivateKey === key.fingerprint) {
+      setPinnedPrivateKey(null);
+      return;
+    }
+
+    if (!key.is_selected_private) {
+      await handlePrivateKeySelection(key.fingerprint);
+    }
+
+    setPinnedPrivateKey(key.fingerprint);
+  }
+
+  async function handleToggleRecipientPin(key: KeySummary) {
+    if (pinnedRecipients.includes(key.fingerprint)) {
+      setPinnedRecipients((current) => current.filter((value) => value !== key.fingerprint));
+      return;
+    }
+
+    if (!key.is_selected_recipient) {
+      await handleRecipientSelection(key.fingerprint, true);
+    }
+
+    setPinnedRecipients((current) => [...current, key.fingerprint].sort());
+  }
+
   async function handleRemoveKey(key: KeySummary) {
     const approved =
       backendMode === "tauri"
@@ -902,6 +1312,8 @@ export function App() {
     await withBusy("Removing key...", async () => {
       await removeKey(key.fingerprint, key.has_secret);
       setKeyOrder((current) => current.filter((fingerprint) => fingerprint !== key.fingerprint));
+      setPinnedPrivateKey((current) => (current === key.fingerprint ? null : current));
+      setPinnedRecipients((current) => current.filter((fingerprint) => fingerprint !== key.fingerprint));
       await refreshKeys();
       await refreshStatus();
       if (selectedNote) {
@@ -1023,9 +1435,11 @@ export function App() {
                 </Button>
                 <Button
                   onClick={() => void handleCreateKey()}
-                  disabled={!newKeyName.trim() || !newKeyEmail.trim() || !newKeyPassphrase}
+                  disabled={
+                    isCreatingKey || !newKeyName.trim() || !newKeyEmail.trim() || !newKeyPassphrase
+                  }
                 >
-                  Create Key
+                  {isCreatingKey ? "Creating..." : "Create Key"}
                 </Button>
               </DialogFooter>
             </DialogContent>
@@ -1101,6 +1515,13 @@ export function App() {
                             void handlePreferenceChange({ recursive_scan: checked })
                           }
                         />
+                      </div>
+                      <div className="flex items-center justify-between gap-3 px-2 py-2">
+                        <div>
+                          <div className="text-sm font-medium">Use Clipboard</div>
+                          <div className="text-xs text-muted-foreground">Handle PGP paste shortcuts</div>
+                        </div>
+                        <Switch checked={useClipboard} onCheckedChange={setUseClipboard} />
                       </div>
                       <div className="flex items-center justify-between gap-3 px-2 py-2">
                         <div>
@@ -1271,6 +1692,16 @@ export function App() {
                         <RefreshCcw className="h-4 w-4" />
                       </Button>
                       <Button
+                        size="icon"
+                        variant="ghost"
+                        onClick={() => void handleCreateFromClipboard()}
+                        disabled={status.vault_kind === "none"}
+                        aria-label="Decrypt or create note from clipboard"
+                        title="Decrypt or create note from clipboard"
+                      >
+                        <Clipboard className="h-4 w-4" />
+                      </Button>
+                      <Button
                         size="sm"
                         variant="secondary"
                         onClick={() => void handleCreate()}
@@ -1382,10 +1813,14 @@ export function App() {
                           <SortableKeyCard
                             key={key.fingerprint}
                             keyItem={key}
+                            isPrivatePinned={pinnedPrivateKey === key.fingerprint}
+                            isRecipientPinned={pinnedRecipients.includes(key.fingerprint)}
                             onPrivateKeySelection={(fingerprint) => void handlePrivateKeySelection(fingerprint)}
                             onRecipientSelection={(fingerprint, checked) =>
                               void handleRecipientSelection(fingerprint, checked)
                             }
+                            onTogglePrivatePin={(currentKey) => void handleTogglePrivatePin(currentKey)}
+                            onToggleRecipientPin={(currentKey) => void handleToggleRecipientPin(currentKey)}
                             onExportPublic={(currentKey) => void handleExportPublic(currentKey)}
                             onOpenExportDialog={(currentKey, mode) => openExportDialog(currentKey, mode)}
                             onRemoveKey={(currentKey) => void handleRemoveKey(currentKey)}
@@ -1487,8 +1922,21 @@ export function App() {
                   <div className="mb-3 rounded-xl border border-border/70 bg-background/50 p-3">
                     <div className="mb-2 flex items-center justify-between gap-3">
                       <div className="text-sm font-medium">PGP Block Preview</div>
-                      <div className="text-xs text-muted-foreground">
-                        {pgpPreviewBusy ? "Updating..." : "Live preview"}
+                      <div className="flex items-center gap-2">
+                        <div className="text-xs text-muted-foreground">
+                          {pgpPreviewBusy ? "Updating..." : "Live preview"}
+                        </div>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="size-7"
+                          onClick={() => void handleCopyPgpPreview()}
+                          disabled={pgpPreviewBusy || !pgpPreview || Boolean(pgpPreviewError)}
+                          aria-label="Copy PGP block"
+                          title="Copy PGP block"
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                        </Button>
                       </div>
                     </div>
                     {pgpPreviewError ? (

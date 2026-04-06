@@ -19,7 +19,7 @@ impl Default for SessionManager {
             unlocked: false,
             passphrase: None,
             last_activity: None,
-            inactivity_timeout: Duration::from_secs(900),
+            inactivity_timeout: Duration::from_secs(0),
             auto_save: false,
             recursive_scan: true,
         }
