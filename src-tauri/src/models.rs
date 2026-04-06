@@ -14,6 +14,23 @@ pub struct OpenNoteResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteRecipientInfo {
+    pub key_id: String,
+    pub fingerprint: Option<String>,
+    pub label: String,
+    pub has_secret: bool,
+    pub is_selected_private: bool,
+    pub is_selected_recipient: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteEncryptionStatus {
+    pub recipients: Vec<NoteRecipientInfo>,
+    pub can_decrypt_with_selected_key: bool,
+    pub matches_selected_recipients: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeySummary {
     pub fingerprint: String,
     pub user_ids: Vec<String>,

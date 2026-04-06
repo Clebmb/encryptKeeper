@@ -31,3 +31,18 @@ export interface OpenNoteResult {
   note: NoteSummary;
   content: string;
 }
+
+export interface NoteRecipientInfo {
+  key_id: string;
+  fingerprint: string | null;
+  label: string;
+  has_secret: boolean;
+  is_selected_private: boolean;
+  is_selected_recipient: boolean;
+}
+
+export interface NoteEncryptionStatus {
+  recipients: NoteRecipientInfo[];
+  can_decrypt_with_selected_key: boolean;
+  matches_selected_recipients: boolean;
+}

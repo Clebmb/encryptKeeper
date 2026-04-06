@@ -5,7 +5,7 @@ use tauri::State;
 use crate::{
     app_state::AppState,
     errors::{AppError, AppResult},
-    models::{KeySummary, OpenNoteResult, SessionStatus},
+    models::{KeySummary, NoteEncryptionStatus, NoteRecipientInfo, OpenNoteResult, SessionStatus},
 };
 
 #[tauri::command]
@@ -62,6 +62,15 @@ pub fn list_notes(state: State<'_, AppState>) -> AppResult<Vec<crate::models::No
         .read()
         .map_err(|_| AppError::External("vault lock poisoned".into()))?;
     vault.list_notes()
+}
+
+#[tauri::command]
+pub fn refresh_notes(state: State<'_, AppState>) -> AppResult<Vec<crate::models::NoteSummary>> {
+    let mut vault = state
+        .vault
+        .write()
+        .map_err(|_| AppError::External("vault lock poisoned".into()))?;
+    vault.refresh_active_vault()
 }
 
 #[tauri::command]
@@ -122,6 +131,71 @@ pub fn preview_pgp_block(content: String, state: State<'_, AppState>) -> AppResu
 }
 
 #[tauri::command]
+pub fn inspect_note_encryption(
+    note_id: String,
+    state: State<'_, AppState>,
+) -> AppResult<NoteEncryptionStatus> {
+    let path = state
+        .vault
+        .read()
+        .map_err(|_| AppError::External("vault lock poisoned".into()))?
+        .note_path(&note_id)?;
+    let public_listing = state.crypto.list_keys(false)?;
+    let secret_listing = state.crypto.list_keys(true)?;
+    let identities = state.crypto.parse_key_identities(&public_listing, &secret_listing);
+    let key_manager = state
+        .keys
+        .read()
+        .map_err(|_| AppError::External("key manager lock poisoned".into()))?;
+    let selected_private = key_manager.selected_private_key();
+    let selected_recipients = key_manager.selected_recipients();
+    let recipient_key_ids = state.crypto.inspect_file_recipients(&path)?;
+
+    let mut recipients = Vec::new();
+    let mut file_primary_fingerprints = std::collections::HashSet::new();
+    let mut can_decrypt_with_selected_key = false;
+
+    for key_id in recipient_key_ids {
+        if let Some(identity) = identities.iter().find(|identity| identity.key_ids.contains(&key_id)) {
+            let fingerprint = identity.primary_fingerprint.clone();
+            if selected_private.as_ref().is_some_and(|value| value == &fingerprint) {
+                can_decrypt_with_selected_key = true;
+            }
+            file_primary_fingerprints.insert(fingerprint.clone());
+            recipients.push(NoteRecipientInfo {
+                key_id,
+                fingerprint: Some(fingerprint.clone()),
+                label: identity
+                    .user_ids
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| fingerprint.clone()),
+                has_secret: identity.has_secret,
+                is_selected_private: selected_private.as_ref().is_some_and(|value| value == &fingerprint),
+                is_selected_recipient: selected_recipients.contains(&fingerprint),
+            });
+        } else {
+            recipients.push(NoteRecipientInfo {
+                key_id: key_id.clone(),
+                fingerprint: None,
+                label: format!("Unknown key {key_id}"),
+                has_secret: false,
+                is_selected_private: false,
+                is_selected_recipient: false,
+            });
+        }
+    }
+
+    let selected_recipient_set = selected_recipients.into_iter().collect::<std::collections::HashSet<_>>();
+
+    Ok(NoteEncryptionStatus {
+        recipients,
+        can_decrypt_with_selected_key,
+        matches_selected_recipients: file_primary_fingerprints == selected_recipient_set,
+    })
+}
+
+#[tauri::command]
 pub fn create_note(
     name: String,
     content: String,
@@ -173,6 +247,11 @@ pub fn delete_note(note_id: String, state: State<'_, AppState>) -> AppResult<()>
 #[tauri::command]
 pub fn import_key_from_file(path: String, state: State<'_, AppState>) -> AppResult<()> {
     state.crypto.import_key(PathBuf::from(path).as_path())
+}
+
+#[tauri::command]
+pub fn import_key_from_text(armored_text: String, state: State<'_, AppState>) -> AppResult<()> {
+    state.crypto.import_key_text(&armored_text)
 }
 
 #[tauri::command]

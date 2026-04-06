@@ -1,5 +1,6 @@
 import type {
   KeySummary,
+  NoteEncryptionStatus,
   NoteSummary,
   OpenNoteResult,
   SessionStatus,
@@ -21,6 +22,8 @@ async function invokeOrMock<T>(command: string, args?: Record<string, unknown>):
         ) as Promise<T>;
       case "list_notes":
         return mockBackend.listNotes() as Promise<T>;
+      case "refresh_notes":
+        return mockBackend.refreshNotes() as Promise<T>;
       case "open_note":
         return mockBackend.openNote(String(args?.noteId ?? args?.note_id ?? "")) as Promise<T>;
       case "save_note":
@@ -30,6 +33,10 @@ async function invokeOrMock<T>(command: string, args?: Record<string, unknown>):
         ) as Promise<T>;
       case "preview_pgp_block":
         return mockBackend.previewPgpBlock(String(args?.content ?? "")) as Promise<T>;
+      case "inspect_note_encryption":
+        return mockBackend.inspectNoteEncryption(
+          String(args?.noteId ?? args?.note_id ?? ""),
+        ) as Promise<T>;
       case "create_note":
         return mockBackend.createNote(
           String(args?.name ?? ""),
@@ -44,6 +51,8 @@ async function invokeOrMock<T>(command: string, args?: Record<string, unknown>):
         return mockBackend.deleteNote(String(args?.noteId ?? args?.note_id ?? "")) as Promise<T>;
       case "import_key_from_file":
         return mockBackend.importKey(String(args?.path ?? "")) as Promise<T>;
+      case "import_key_from_text":
+        return mockBackend.importKeyText(String(args?.armoredText ?? args?.armored_text ?? "")) as Promise<T>;
       case "create_key":
         return mockBackend.createKey(
           String(args?.name ?? ""),
@@ -101,6 +110,10 @@ export async function listNotes(): Promise<NoteSummary[]> {
   return invokeOrMock("list_notes");
 }
 
+export async function refreshNotesFromVault(): Promise<NoteSummary[]> {
+  return invokeOrMock("refresh_notes");
+}
+
 export async function openNote(noteId: string): Promise<OpenNoteResult> {
   return invokeOrMock("open_note", { noteId });
 }
@@ -111,6 +124,10 @@ export async function saveNote(noteId: string, content: string): Promise<void> {
 
 export async function previewPgpBlock(content: string): Promise<string> {
   return invokeOrMock("preview_pgp_block", { content });
+}
+
+export async function inspectNoteEncryption(noteId: string): Promise<NoteEncryptionStatus> {
+  return invokeOrMock("inspect_note_encryption", { noteId });
 }
 
 export async function createNote(name: string, content: string): Promise<NoteSummary> {
@@ -127,6 +144,10 @@ export async function deleteNote(noteId: string): Promise<void> {
 
 export async function importKey(path: string): Promise<void> {
   return invokeOrMock("import_key_from_file", { path });
+}
+
+export async function importKeyText(armoredText: string): Promise<void> {
+  return invokeOrMock("import_key_from_text", { armoredText });
 }
 
 export async function createKey(name: string, email: string, passphrase: string): Promise<void> {

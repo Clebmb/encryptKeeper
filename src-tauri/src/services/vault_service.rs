@@ -57,6 +57,18 @@ impl VaultService {
         }
     }
 
+    pub fn refresh_active_vault(&mut self) -> AppResult<Vec<NoteSummary>> {
+        match &self.active_vault {
+            Some(ActiveVault::Folder { root, recursive, .. }) => {
+                let root = root.clone();
+                let recursive = *recursive;
+                self.open_folder(root, recursive)
+            }
+            Some(ActiveVault::Archive { .. }) => Err(AppError::ArchiveNotImplemented),
+            None => Ok(Vec::new()),
+        }
+    }
+
     pub fn vault_kind(&self) -> &'static str {
         match self.active_vault {
             Some(ActiveVault::Folder { .. }) => "folder",

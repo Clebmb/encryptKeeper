@@ -68,12 +68,15 @@ import {
   getBackendMode,
   getStatus,
   importKey,
+  importKeyText,
+  inspectNoteEncryption,
   listKeys,
   listNotes,
   lockSession,
   openFolderVault,
   openNote,
   previewPgpBlock,
+  refreshNotesFromVault,
   removeKey,
   renameNote,
   saveNote,
@@ -84,7 +87,7 @@ import {
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { normalizeNoteName } from "@/lib/noteName";
-import type { KeySummary, NoteSummary, SessionStatus } from "@/types";
+import type { KeySummary, NoteEncryptionStatus, NoteSummary, SessionStatus } from "@/types";
 
 const defaultStatus: SessionStatus = {
   vault_kind: "none",
@@ -99,7 +102,16 @@ const defaultStatus: SessionStatus = {
   auto_save: false,
 };
 
+const defaultNoteEncryptionStatus: NoteEncryptionStatus = {
+  recipients: [],
+  can_decrypt_with_selected_key: false,
+  matches_selected_recipients: true,
+};
+
 const KEY_ORDER_STORAGE_KEY = "encryptkeeper.key-order";
+const HIDE_NOTE_NAMES_ON_LOCK_STORAGE_KEY = "encryptkeeper.hide-note-names-on-lock";
+const AUTO_SHOW_RECIPIENTS_STORAGE_KEY = "encryptkeeper.auto-show-recipients";
+const AUTO_SHOW_PGP_BLOCK_STORAGE_KEY = "encryptkeeper.auto-show-pgp-block";
 
 function formatFingerprint(fingerprint: string) {
   if (fingerprint.length <= 18) {
@@ -153,6 +165,31 @@ function loadStoredKeyOrder() {
     return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : [];
   } catch {
     return [] as string[];
+  }
+}
+
+function loadHideNoteNamesOnLock() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  try {
+    return window.localStorage.getItem(HIDE_NOTE_NAMES_ON_LOCK_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function loadStoredBoolean(key: string, fallback = false) {
+  if (typeof window === "undefined") {
+    return fallback;
+  }
+
+  try {
+    const value = window.localStorage.getItem(key);
+    return value === null ? fallback : value === "true";
+  } catch {
+    return fallback;
   }
 }
 
@@ -305,6 +342,17 @@ export function App() {
   const [pgpPreview, setPgpPreview] = useState("");
   const [pgpPreviewError, setPgpPreviewError] = useState<string | null>(null);
   const [pgpPreviewBusy, setPgpPreviewBusy] = useState(false);
+  const [noteEncryptionStatus, setNoteEncryptionStatus] = useState<NoteEncryptionStatus>(
+    defaultNoteEncryptionStatus,
+  );
+  const [showRecipients, setShowRecipients] = useState(true);
+  const [hideNoteNamesOnLock, setHideNoteNamesOnLock] = useState(() => loadHideNoteNamesOnLock());
+  const [autoShowRecipients, setAutoShowRecipients] = useState(() =>
+    loadStoredBoolean(AUTO_SHOW_RECIPIENTS_STORAGE_KEY, false),
+  );
+  const [autoShowPgpBlock, setAutoShowPgpBlock] = useState(() =>
+    loadStoredBoolean(AUTO_SHOW_PGP_BLOCK_STORAGE_KEY, false),
+  );
   const [isCreateKeyOpen, setIsCreateKeyOpen] = useState(false);
   const [newKeyName, setNewKeyName] = useState("");
   const [newKeyEmail, setNewKeyEmail] = useState("");
@@ -335,6 +383,25 @@ export function App() {
 
   async function refreshNotes() {
     setNotes(await listNotes());
+  }
+
+  async function handleRefreshNotes() {
+    await withBusy("Refreshing notes...", async () => {
+      const nextNotes = await refreshNotesFromVault();
+      setNotes(nextNotes);
+      if (selectedNote && !nextNotes.some((note) => note.id === selectedNote.id)) {
+        setSelectedNote(null);
+        setEditorValue("");
+        setDirty(false);
+        setShowRecipients(false);
+        setIsPgpPreviewOpen(false);
+        setNoteEncryptionStatus(defaultNoteEncryptionStatus);
+      }
+    });
+  }
+
+  async function refreshNoteEncryption(noteId: string) {
+    setNoteEncryptionStatus(await inspectNoteEncryption(noteId));
   }
 
   useEffect(() => {
@@ -375,6 +442,36 @@ export function App() {
   }, [keyOrder]);
 
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(
+      HIDE_NOTE_NAMES_ON_LOCK_STORAGE_KEY,
+      hideNoteNamesOnLock ? "true" : "false",
+    );
+  }, [hideNoteNamesOnLock]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(
+      AUTO_SHOW_RECIPIENTS_STORAGE_KEY,
+      autoShowRecipients ? "true" : "false",
+    );
+  }, [autoShowRecipients]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(
+      AUTO_SHOW_PGP_BLOCK_STORAGE_KEY,
+      autoShowPgpBlock ? "true" : "false",
+    );
+  }, [autoShowPgpBlock]);
+
+  useEffect(() => {
     if (!status.auto_save || !dirty || !selectedNote || !status.session_unlocked) {
       return;
     }
@@ -395,6 +492,8 @@ export function App() {
       setIsPgpPreviewOpen(false);
       setPgpPreview("");
       setPgpPreviewError(null);
+      setNoteEncryptionStatus(defaultNoteEncryptionStatus);
+      setShowRecipients(false);
     }
     wasUnlockedRef.current = status.session_unlocked;
   }, [status.session_unlocked]);
@@ -545,6 +644,24 @@ export function App() {
     }
   }
 
+  async function handleImportClipboard() {
+    try {
+      setError(null);
+      const clipboardText = await navigator.clipboard.readText();
+      if (!clipboardText.trim()) {
+        throw new Error("Clipboard is empty.");
+      }
+
+      await withBusy("Importing key from clipboard...", async () => {
+        await importKeyText(clipboardText);
+        await refreshKeys();
+        await refreshStatus();
+      });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
   async function handleUnlock() {
     await withBusy("Unlocking session...", async () => {
       await unlockSession(passphrase);
@@ -559,6 +676,9 @@ export function App() {
       setSelectedNote(opened.note);
       setEditorValue(opened.content);
       setDirty(false);
+      setShowRecipients(autoShowRecipients);
+      setIsPgpPreviewOpen(autoShowPgpBlock);
+      await refreshNoteEncryption(opened.note.id);
       await refreshStatus();
     });
   }
@@ -571,6 +691,7 @@ export function App() {
       await saveNote(selectedNote.id, editorValue);
       setDirty(false);
       await refreshNotes();
+      await refreshNoteEncryption(selectedNote.id);
     });
   }
 
@@ -735,11 +856,33 @@ export function App() {
     const next = checked
       ? [...status.selected_recipients, fingerprint]
       : status.selected_recipients.filter((value) => value !== fingerprint);
-    await withBusy("Updating recipients...", async () => {
+    await withBusy(
+      selectedNote && status.session_unlocked && next.length > 0
+        ? "Updating recipients and re-encrypting note..."
+        : "Updating recipients...",
+      async () => {
+      setError(null);
       await setRecipients(next);
+
+      if (selectedNote && status.session_unlocked && next.length > 0) {
+        await saveNote(selectedNote.id, editorValue);
+        setDirty(false);
+        await refreshNotes();
+      }
+
       await refreshKeys();
       await refreshStatus();
-    });
+      if (selectedNote) {
+        await refreshNoteEncryption(selectedNote.id);
+      }
+
+      if (selectedNote && status.session_unlocked && next.length === 0) {
+        setError(
+          "No recipients are selected. The open note was not re-encrypted and remains saved with its previous recipients until you select a recipient again.",
+        );
+      }
+      },
+    );
   }
 
   async function handleRemoveKey(key: KeySummary) {
@@ -761,6 +904,9 @@ export function App() {
       setKeyOrder((current) => current.filter((fingerprint) => fingerprint !== key.fingerprint));
       await refreshKeys();
       await refreshStatus();
+      if (selectedNote) {
+        await refreshNoteEncryption(selectedNote.id);
+      }
     });
   }
 
@@ -968,6 +1114,36 @@ export function App() {
                           }
                         />
                       </div>
+                      <div className="flex items-center justify-between gap-3 px-2 py-2">
+                        <div>
+                          <div className="text-sm font-medium">Hide Note Names</div>
+                          <div className="text-xs text-muted-foreground">Hides note names on lock</div>
+                        </div>
+                        <Switch
+                          checked={hideNoteNamesOnLock}
+                          onCheckedChange={setHideNoteNamesOnLock}
+                        />
+                      </div>
+                      <div className="flex items-center justify-between gap-3 px-2 py-2">
+                        <div>
+                          <div className="text-sm font-medium">Auto-Show Recipients</div>
+                          <div className="text-xs text-muted-foreground">Shows recipients when a note opens</div>
+                        </div>
+                        <Switch
+                          checked={autoShowRecipients}
+                          onCheckedChange={setAutoShowRecipients}
+                        />
+                      </div>
+                      <div className="flex items-center justify-between gap-3 px-2 py-2">
+                        <div>
+                          <div className="text-sm font-medium">Auto-Show PGP Block</div>
+                          <div className="text-xs text-muted-foreground">Shows PGP block when a note opens</div>
+                        </div>
+                        <Switch
+                          checked={autoShowPgpBlock}
+                          onCheckedChange={setAutoShowPgpBlock}
+                        />
+                      </div>
                     </DropdownMenuContent>
                   </DropdownMenu>
                   <Button size="sm" onClick={() => void handleOpenFolder()}>
@@ -1091,7 +1267,7 @@ export function App() {
                       <CardTitle className="text-base">Notes</CardTitle>
                     </div>
                     <div className="flex gap-1">
-                      <Button variant="ghost" size="icon" onClick={() => void refreshNotes()}>
+                      <Button variant="ghost" size="icon" onClick={() => void handleRefreshNotes()}>
                         <RefreshCcw className="h-4 w-4" />
                       </Button>
                       <Button
@@ -1135,10 +1311,21 @@ export function App() {
                             )}
                             onClick={() => void handleSelectNote(note)}
                           >
-                            <div className="truncate text-sm font-medium">{note.name}</div>
-                            <div className="mt-1 truncate text-xs text-muted-foreground">
-                              {note.relative_path}
-                            </div>
+                            {hideNoteNamesOnLock && !status.session_unlocked ? (
+                              <>
+                                <div className="truncate text-sm font-medium">Hidden</div>
+                                <div className="mt-1 truncate text-xs text-muted-foreground">
+                                  Unlock to view note names
+                                </div>
+                              </>
+                            ) : (
+                              <>
+                                <div className="truncate text-sm font-medium">{note.name}</div>
+                                <div className="mt-1 truncate text-xs text-muted-foreground">
+                                  {note.relative_path}
+                                </div>
+                              </>
+                            )}
                           </button>
                         ))
                       )}
@@ -1162,10 +1349,20 @@ export function App() {
                       <Plus className="h-4 w-4" />
                       Create
                     </Button>
-                    <Button size="sm" variant="secondary" onClick={() => void handleImportKey()}>
-                      <FileKey className="h-4 w-4" />
-                      Import
-                    </Button>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button size="sm" variant="secondary">
+                          <FileKey className="h-4 w-4" />
+                          Import
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" side="bottom" className="w-36">
+                        <DropdownMenuItem onClick={() => void handleImportKey()}>File</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => void handleImportClipboard()}>
+                          Clipboard
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-4 pt-0">
@@ -1176,7 +1373,7 @@ export function App() {
                       strategy={verticalListSortingStrategy}
                     >
                     <div className="space-y-2">
-                      {orderedKeys.length === 0 ? (
+                    {orderedKeys.length === 0 ? (
                         <div className="rounded-lg border border-dashed border-border p-3 text-sm text-muted-foreground">
                           No keys imported yet.
                         </div>
@@ -1220,6 +1417,14 @@ export function App() {
                     <Button
                       size="sm"
                       variant="secondary"
+                      onClick={() => setShowRecipients((value) => !value)}
+                      disabled={!selectedNote}
+                    >
+                      {showRecipients ? "Hide Recipients" : "Show Recipients"}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
                       onClick={() => void handleTogglePgpPreview()}
                       disabled={!selectedNote || !status.session_unlocked}
                     >
@@ -1246,6 +1451,38 @@ export function App() {
                 </div>
               </CardHeader>
               <CardContent className="pt-0 lg:flex lg:flex-1 lg:flex-col">
+                {selectedNote && showRecipients ? (
+                  <div className="mb-3 rounded-xl border border-border/70 bg-background/50 p-3">
+                    <div className="flex flex-col gap-2">
+                      <div className="text-sm font-medium">Note Recipients</div>
+                      <div className="flex flex-wrap gap-2">
+                        {noteEncryptionStatus.recipients.length === 0 ? (
+                          <Badge variant="secondary">No recipients detected</Badge>
+                        ) : (
+                          noteEncryptionStatus.recipients.map((recipient) => (
+                            <Badge
+                              key={`${recipient.key_id}-${recipient.fingerprint ?? "unknown"}`}
+                              variant={recipient.is_selected_recipient ? "default" : "secondary"}
+                            >
+                              {recipient.label}
+                            </Badge>
+                          ))
+                        )}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {noteEncryptionStatus.can_decrypt_with_selected_key
+                          ? "The selected private key matches this note."
+                          : "The selected private key does not match this note."}
+                      </div>
+                      {!noteEncryptionStatus.matches_selected_recipients ? (
+                        <div className="text-xs text-amber-200">
+                          This file is currently encrypted to a different recipient set than the one selected above.
+                          Changing recipients re-encrypts the open note immediately.
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
                 {isPgpPreviewOpen ? (
                   <div className="mb-3 rounded-xl border border-border/70 bg-background/50 p-3">
                     <div className="mb-2 flex items-center justify-between gap-3">

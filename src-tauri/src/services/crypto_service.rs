@@ -13,6 +13,14 @@ use crate::{
 #[derive(Default)]
 pub struct CryptoService;
 
+#[derive(Clone)]
+pub struct ParsedKeyIdentity {
+    pub primary_fingerprint: String,
+    pub user_ids: Vec<String>,
+    pub has_secret: bool,
+    pub key_ids: Vec<String>,
+}
+
 impl CryptoService {
     pub fn create_key(&self, name: &str, email: &str, passphrase: &str) -> AppResult<()> {
         let trimmed_name = name.trim();
@@ -69,6 +77,28 @@ impl CryptoService {
             .arg(path.as_os_str())
             .output()
             .map_err(|_| AppError::GpgUnavailable)?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(AppError::External(String::from_utf8_lossy(&output.stderr).trim().to_string()))
+    }
+
+    pub fn import_key_text(&self, armored_text: &str) -> AppResult<()> {
+        let mut child = self
+            .gpg_command()?
+            .args(["--batch", "--import"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|_| AppError::GpgUnavailable)?;
+
+        if let Some(stdin) = &mut child.stdin {
+            use std::io::Write;
+            stdin.write_all(armored_text.as_bytes())?;
+        }
+
+        let output = child.wait_with_output()?;
         if output.status.success() {
             return Ok(());
         }
@@ -320,6 +350,30 @@ impl CryptoService {
         Err(AppError::External(String::from_utf8_lossy(&output.stderr).trim().to_string()))
     }
 
+    pub fn inspect_file_recipients(&self, path: &Path) -> AppResult<Vec<String>> {
+        let output = self
+            .gpg_command()?
+            .args(["--batch", "--list-packets"])
+            .arg(path.as_os_str())
+            .output()
+            .map_err(|_| AppError::GpgUnavailable)?;
+        if !output.status.success() {
+            return Err(AppError::External(String::from_utf8_lossy(&output.stderr).trim().to_string()));
+        }
+
+        let stdout = String::from_utf8(output.stdout)?;
+        let mut recipients = Vec::new();
+        for line in stdout.lines() {
+            if let Some((_, key_id)) = line.split_once("keyid ") {
+                let normalized = key_id.trim().to_uppercase();
+                if !recipients.contains(&normalized) {
+                    recipients.push(normalized);
+                }
+            }
+        }
+        Ok(recipients)
+    }
+
     fn gpg_command(&self) -> AppResult<Command> {
         let gpg = self.resolve_gpg_binary()?;
         let mut command = Command::new(gpg);
@@ -365,33 +419,64 @@ impl CryptoService {
     }
 
     pub fn parse_keys(&self, public_listing: &str, secret_listing: &str) -> Vec<KeySummary> {
+        self.parse_key_identities(public_listing, secret_listing)
+            .into_iter()
+            .map(|identity| KeySummary {
+                has_secret: identity.has_secret,
+                fingerprint: identity.primary_fingerprint,
+                user_ids: identity.user_ids,
+                is_selected_private: false,
+                is_selected_recipient: false,
+            })
+            .collect()
+    }
+
+    pub fn parse_key_identities(
+        &self,
+        public_listing: &str,
+        secret_listing: &str,
+    ) -> Vec<ParsedKeyIdentity> {
         let secret_fingerprints = Self::collect_primary_fingerprints(secret_listing, "sec");
 
         let mut summaries = Vec::new();
         let mut current_fingerprint: Option<String> = None;
         let mut current_user_ids = Vec::new();
         let mut waiting_for_primary_fpr = false;
+        let mut waiting_for_subkey_fpr = false;
+        let mut current_key_ids = Vec::new();
 
         for line in public_listing.lines() {
             let parts: Vec<&str> = line.split(':').collect();
             match parts.first().copied().unwrap_or_default() {
                 "pub" => {
                     if let Some(fingerprint) = current_fingerprint.take() {
-                        summaries.push(KeySummary {
+                        summaries.push(ParsedKeyIdentity {
                             has_secret: secret_fingerprints.contains(&fingerprint),
-                            fingerprint,
+                            primary_fingerprint: fingerprint,
                             user_ids: current_user_ids.clone(),
-                            is_selected_private: false,
-                            is_selected_recipient: false,
+                            key_ids: current_key_ids.clone(),
                         });
                         current_user_ids.clear();
+                        current_key_ids.clear();
                     }
                     waiting_for_primary_fpr = true;
+                    waiting_for_subkey_fpr = false;
+                }
+                "sub" => {
+                    waiting_for_subkey_fpr = true;
                 }
                 "fpr" => {
                     if waiting_for_primary_fpr {
                         current_fingerprint = parts.get(9).map(|value| (*value).to_string());
+                        if let Some(fingerprint) = &current_fingerprint {
+                            current_key_ids.push(Self::short_key_id(fingerprint));
+                        }
                         waiting_for_primary_fpr = false;
+                    } else if waiting_for_subkey_fpr {
+                        if let Some(fingerprint) = parts.get(9) {
+                            current_key_ids.push(Self::short_key_id(fingerprint));
+                        }
+                        waiting_for_subkey_fpr = false;
                     }
                 }
                 "uid" => {
@@ -404,18 +489,17 @@ impl CryptoService {
         }
 
         if let Some(fingerprint) = current_fingerprint.take() {
-            summaries.push(KeySummary {
+            summaries.push(ParsedKeyIdentity {
                 has_secret: secret_fingerprints.contains(&fingerprint),
-                fingerprint,
+                primary_fingerprint: fingerprint,
                 user_ids: current_user_ids,
-                is_selected_private: false,
-                is_selected_recipient: false,
+                key_ids: current_key_ids,
             });
         }
 
         let mut dedup = HashMap::new();
         for summary in summaries {
-            dedup.insert(summary.fingerprint.clone(), summary);
+            dedup.insert(summary.primary_fingerprint.clone(), summary);
         }
         let mut ordered = dedup.into_values().collect::<Vec<_>>();
         ordered.sort_by(|left, right| {
@@ -423,9 +507,21 @@ impl CryptoService {
             let right_name = right.user_ids.first().map(String::as_str).unwrap_or("");
             left_name
                 .cmp(right_name)
-                .then_with(|| left.fingerprint.cmp(&right.fingerprint))
+                .then_with(|| left.primary_fingerprint.cmp(&right.primary_fingerprint))
         });
         ordered
+    }
+
+    fn short_key_id(fingerprint: &str) -> String {
+        fingerprint
+            .chars()
+            .rev()
+            .take(16)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<String>()
+            .to_uppercase()
     }
 
     fn collect_primary_fingerprints(listing: &str, record_type: &str) -> HashSet<String> {

@@ -1,4 +1,10 @@
-import type { KeySummary, NoteSummary, OpenNoteResult, SessionStatus } from "../types";
+import type {
+  KeySummary,
+  NoteEncryptionStatus,
+  NoteSummary,
+  OpenNoteResult,
+  SessionStatus,
+} from "../types";
 import { normalizeNoteName } from "./noteName";
 
 interface MockNoteRecord extends NoteSummary {
@@ -123,6 +129,10 @@ export async function listNotes(): Promise<NoteSummary[]> {
   return getStore().notes;
 }
 
+export async function refreshNotes(): Promise<NoteSummary[]> {
+  return getStore().notes;
+}
+
 export async function openNote(noteId: string): Promise<OpenNoteResult> {
   const store = getStore();
   if (!store.status.session_unlocked) {
@@ -163,6 +173,29 @@ export async function previewPgpBlock(content: string): Promise<string> {
     body || "=",
     "-----END PGP MESSAGE-----",
   ].join("\n");
+}
+
+export async function inspectNoteEncryption(_noteId: string): Promise<NoteEncryptionStatus> {
+  const store = getStore();
+  const recipients = store.status.selected_recipients.map((fingerprint) => {
+    const key = store.keys.find((entry) => entry.fingerprint === fingerprint);
+    return {
+      key_id: fingerprint.slice(-16),
+      fingerprint,
+      label: key?.user_ids[0] ?? fingerprint,
+      has_secret: Boolean(key?.has_secret),
+      is_selected_private: store.status.selected_private_key === fingerprint,
+      is_selected_recipient: true,
+    };
+  });
+
+  return {
+    recipients,
+    can_decrypt_with_selected_key: recipients.some(
+      (recipient) => recipient.fingerprint === store.status.selected_private_key,
+    ),
+    matches_selected_recipients: true,
+  };
 }
 
 export async function createNote(name: string, content: string): Promise<NoteSummary> {
@@ -224,6 +257,28 @@ export async function importKey(path: string): Promise<void> {
         fingerprint,
         user_ids: [`${name} <imported@encryptkeeper.local>`],
         has_secret: true,
+        is_selected_private: false,
+        is_selected_recipient: false,
+      },
+    ],
+  }));
+}
+
+export async function importKeyText(armoredText: string): Promise<void> {
+  if (!armoredText.includes("BEGIN PGP")) {
+    throw new Error("Clipboard does not contain a PGP key block.");
+  }
+
+  const fingerprint = `CLIPBOARD-${Math.random().toString(36).slice(2, 8)}`.toUpperCase();
+  const hasSecret = armoredText.includes("PRIVATE KEY");
+  updateStore((current) => ({
+    ...current,
+    keys: [
+      ...current.keys,
+      {
+        fingerprint,
+        user_ids: [`Clipboard Import <imported@encryptkeeper.local>`],
+        has_secret: hasSecret,
         is_selected_private: false,
         is_selected_recipient: false,
       },
