@@ -4,6 +4,7 @@ import type {
   NoteEncryptionStatus,
   NoteSummary,
   OpenNoteResult,
+  PinnedKeySettings,
   SessionStatus,
 } from "../types";
 import * as mockBackend from "./mockBackend";
@@ -66,6 +67,13 @@ async function invokeOrMock<T>(command: string, args?: Record<string, unknown>):
         ) as Promise<T>;
       case "list_keys":
         return mockBackend.listKeys() as Promise<T>;
+      case "get_pinned_key_settings":
+        return mockBackend.getPinnedKeySettings() as Promise<T>;
+      case "save_pinned_key_settings":
+        return mockBackend.savePinnedKeySettings(
+          (args?.privateKeyFingerprint as string | null | undefined) ?? null,
+          (args?.recipientFingerprints as string[] | undefined) ?? [],
+        ) as Promise<T>;
       case "select_private_key":
         return mockBackend.selectPrivateKey(String(args?.fingerprint ?? "")) as Promise<T>;
       case "export_public_key":
@@ -165,6 +173,20 @@ export async function createKey(name: string, email: string, passphrase: string)
 
 export async function listKeys(): Promise<KeySummary[]> {
   return invokeOrMock("list_keys");
+}
+
+export async function getPinnedKeySettings(): Promise<PinnedKeySettings> {
+  return invokeOrMock("get_pinned_key_settings");
+}
+
+export async function savePinnedKeySettings(
+  privateKeyFingerprint: string | null,
+  recipientFingerprints: string[],
+): Promise<PinnedKeySettings> {
+  return invokeOrMock("save_pinned_key_settings", {
+    privateKeyFingerprint,
+    recipientFingerprints,
+  });
 }
 
 export async function selectPrivateKey(fingerprint: string): Promise<void> {

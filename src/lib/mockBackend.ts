@@ -3,6 +3,7 @@ import type {
   NoteEncryptionStatus,
   NoteSummary,
   OpenNoteResult,
+  PinnedKeySettings,
   SessionStatus,
 } from "../types";
 import { normalizeNoteName } from "./noteName";
@@ -18,6 +19,7 @@ interface MockStore {
 }
 
 const STORAGE_KEY = "encryptkeeper.mock.store";
+const PINNED_SETTINGS_STORAGE_KEY = "encryptkeeper.mock.pinned-key-settings";
 
 const defaultStatus: SessionStatus = {
   vault_kind: "none",
@@ -344,6 +346,43 @@ export async function createKey(name: string, email: string, _passphrase: string
 
 export async function listKeys(): Promise<KeySummary[]> {
   return getStore().keys;
+}
+
+export async function getPinnedKeySettings(): Promise<PinnedKeySettings> {
+  const raw = window.localStorage.getItem(PINNED_SETTINGS_STORAGE_KEY);
+  if (!raw) {
+    return {
+      private_key_fingerprint: null,
+      recipient_fingerprints: [],
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as PinnedKeySettings;
+    return {
+      private_key_fingerprint: parsed.private_key_fingerprint ?? null,
+      recipient_fingerprints: Array.isArray(parsed.recipient_fingerprints)
+        ? parsed.recipient_fingerprints.filter((value): value is string => typeof value === "string")
+        : [],
+    };
+  } catch {
+    return {
+      private_key_fingerprint: null,
+      recipient_fingerprints: [],
+    };
+  }
+}
+
+export async function savePinnedKeySettings(
+  privateKeyFingerprint: string | null,
+  recipientFingerprints: string[],
+): Promise<PinnedKeySettings> {
+  const next = {
+    private_key_fingerprint: privateKeyFingerprint,
+    recipient_fingerprints: recipientFingerprints,
+  };
+  window.localStorage.setItem(PINNED_SETTINGS_STORAGE_KEY, JSON.stringify(next));
+  return next;
 }
 
 export async function selectPrivateKey(fingerprint: string): Promise<void> {

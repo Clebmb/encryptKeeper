@@ -19,11 +19,13 @@ import {
   ArrowDownUp,
   Clipboard,
   Copy,
+  FolderPlus,
   FileKey,
   FolderOpen,
   GripVertical,
   Lock,
   NotebookPen,
+  Pencil,
   Pin,
   Plus,
   RefreshCcw,
@@ -59,7 +61,10 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
@@ -68,6 +73,7 @@ import {
   deleteNote,
   exportPrivateKey,
   exportPublicKey,
+  getPinnedKeySettings,
   getBackendMode,
   getStatus,
   importKey,
@@ -84,6 +90,7 @@ import {
   removeKey,
   renameNote,
   saveNote,
+  savePinnedKeySettings,
   selectPrivateKey,
   setRecipients,
   unlockSession,
@@ -114,37 +121,21 @@ const defaultNoteEncryptionStatus: NoteEncryptionStatus = {
 
 const KEY_ORDER_STORAGE_KEY = "encryptkeeper.key-order";
 const HIDE_NOTE_NAMES_ON_LOCK_STORAGE_KEY = "encryptkeeper.hide-note-names-on-lock";
-const PINNED_PRIVATE_KEY_STORAGE_KEY = "encryptkeeper.pinned-private-key";
-const PINNED_RECIPIENTS_STORAGE_KEY = "encryptkeeper.pinned-recipients";
 const USE_CLIPBOARD_STORAGE_KEY = "encryptkeeper.use-clipboard";
 const AUTO_SHOW_RECIPIENTS_STORAGE_KEY = "encryptkeeper.auto-show-recipients";
 const AUTO_SHOW_PGP_BLOCK_STORAGE_KEY = "encryptkeeper.auto-show-pgp-block";
+const SAVED_VAULTS_STORAGE_KEY = "encryptkeeper.saved-vaults";
+const PINNED_VAULT_PATH_STORAGE_KEY = "encryptkeeper.pinned-vault-path";
+const WINDOW_SIZE_STORAGE_KEY = "encryptkeeper.window-size";
 
-function loadStoredString(key: string) {
-  if (typeof window === "undefined") {
-    return null;
-  }
-
-  try {
-    const value = window.localStorage.getItem(key);
-    return value && value.trim() ? value : null;
-  } catch {
-    return null;
-  }
+interface SavedVault {
+  path: string;
+  label: string;
 }
 
-function loadStoredStringArray(key: string) {
-  if (typeof window === "undefined") {
-    return [] as string[];
-  }
-
-  try {
-    const raw = window.localStorage.getItem(key);
-    const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : [];
-  } catch {
-    return [] as string[];
-  }
+interface StoredWindowSize {
+  width: number;
+  height: number;
 }
 
 function formatFingerprint(fingerprint: string) {
@@ -175,10 +166,6 @@ function formatCountdown(seconds: number | null, unlocked: boolean, timeoutSecs:
   const mins = Math.floor(seconds / 60);
   const secs = seconds % 60;
   return `Locks in ${mins}:${secs.toString().padStart(2, "0")}`;
-}
-
-function activeVaultLabel(vaultKind: SessionStatus["vault_kind"]) {
-  return vaultKind === "none" ? "No vault" : `${vaultKind} vault`;
 }
 
 function joinPath(base: string, fileName: string) {
@@ -225,6 +212,78 @@ function loadStoredBoolean(key: string, fallback = false) {
   } catch {
     return fallback;
   }
+}
+
+function loadStoredVaults() {
+  if (typeof window === "undefined") {
+    return [] as SavedVault[];
+  }
+
+  try {
+    const raw = window.localStorage.getItem(SAVED_VAULTS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) {
+      return [] as SavedVault[];
+    }
+
+    return parsed
+      .filter(
+        (value): value is SavedVault =>
+          typeof value === "object" &&
+          value !== null &&
+          typeof value.path === "string" &&
+          typeof value.label === "string",
+      )
+      .map((vault) => ({ path: vault.path, label: vault.label.trim() || deriveVaultLabel(vault.path) }))
+      .sort((left, right) => left.label.localeCompare(right.label));
+  } catch {
+    return [] as SavedVault[];
+  }
+}
+
+function loadStoredPinnedVaultPath() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    const value = window.localStorage.getItem(PINNED_VAULT_PATH_STORAGE_KEY);
+    return value && value.trim() ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function loadStoredWindowSize() {
+  if (typeof window === "undefined") {
+    return null as StoredWindowSize | null;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(WINDOW_SIZE_STORAGE_KEY);
+    const parsed = raw ? (JSON.parse(raw) as Partial<StoredWindowSize>) : null;
+    if (
+      !parsed ||
+      typeof parsed.width !== "number" ||
+      typeof parsed.height !== "number" ||
+      parsed.width <= 0 ||
+      parsed.height <= 0
+    ) {
+      return null;
+    }
+
+    return {
+      width: parsed.width,
+      height: parsed.height,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function deriveVaultLabel(path: string) {
+  const segments = path.split(/[/\\]/).filter(Boolean);
+  return segments[segments.length - 1] || path;
 }
 
 function keyDisplayName(key: KeySummary) {
@@ -500,20 +559,23 @@ export function App() {
   const [newKeyEmail, setNewKeyEmail] = useState("");
   const [newKeyPassphrase, setNewKeyPassphrase] = useState("");
   const [isCreatingKey, setIsCreatingKey] = useState(false);
+  const [savedVaults, setSavedVaults] = useState<SavedVault[]>(() => loadStoredVaults());
+  const [pinnedVaultPath, setPinnedVaultPath] = useState<string | null>(() => loadStoredPinnedVaultPath());
+  const [isVaultSaveDialogOpen, setIsVaultSaveDialogOpen] = useState(false);
+  const [vaultPathInput, setVaultPathInput] = useState("");
+  const [vaultLabelInput, setVaultLabelInput] = useState("");
   const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
   const [exportMode, setExportMode] = useState<"private" | "both">("private");
   const [exportTargetKey, setExportTargetKey] = useState<KeySummary | null>(null);
   const [exportPassphrase, setExportPassphrase] = useState("");
   const [keyOrder, setKeyOrder] = useState<string[]>(() => loadStoredKeyOrder());
-  const [pinnedPrivateKey, setPinnedPrivateKey] = useState<string | null>(() =>
-    loadStoredString(PINNED_PRIVATE_KEY_STORAGE_KEY),
-  );
-  const [pinnedRecipients, setPinnedRecipients] = useState<string[]>(() =>
-    loadStoredStringArray(PINNED_RECIPIENTS_STORAGE_KEY),
-  );
+  const [pinnedPrivateKey, setPinnedPrivateKey] = useState<string | null>(null);
+  const [pinnedRecipients, setPinnedRecipients] = useState<string[]>([]);
   const wasUnlockedRef = useRef(status.session_unlocked);
   const previewRequestRef = useRef(0);
   const createKeyInFlightRef = useRef(false);
+  const applyingPinnedSettingsRef = useRef(false);
+  const autoOpenedPinnedVaultRef = useRef(false);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
 
   async function refreshStatus() {
@@ -525,6 +587,7 @@ export function App() {
         ? ""
         : String(Math.max(1, Math.round(nextStatus.inactivity_timeout_secs / 60))),
     );
+    return nextStatus;
   }
 
   async function refreshKeys() {
@@ -558,7 +621,19 @@ export function App() {
     void (async () => {
       setBusy("Loading workspace...");
       try {
-        await Promise.all([refreshStatus(), refreshKeys(), refreshNotes()]);
+        const [pinnedSettings, nextStatus] = await Promise.all([
+          getPinnedKeySettings(),
+          refreshStatus(),
+          refreshKeys(),
+          refreshNotes(),
+        ]);
+        setPinnedPrivateKey(pinnedSettings.private_key_fingerprint);
+        setPinnedRecipients(pinnedSettings.recipient_fingerprints);
+
+        if (!autoOpenedPinnedVaultRef.current && pinnedVaultPath) {
+          autoOpenedPinnedVaultRef.current = true;
+          await openVaultPath(pinnedVaultPath, "Opening pinned vault...", nextStatus.recursive_scan);
+        }
       } catch (cause) {
         setError(String(cause));
       } finally {
@@ -595,19 +670,49 @@ export function App() {
     if (typeof window === "undefined") {
       return;
     }
-    if (pinnedPrivateKey) {
-      window.localStorage.setItem(PINNED_PRIVATE_KEY_STORAGE_KEY, pinnedPrivateKey);
-      return;
-    }
-    window.localStorage.removeItem(PINNED_PRIVATE_KEY_STORAGE_KEY);
-  }, [pinnedPrivateKey]);
+    window.localStorage.setItem(SAVED_VAULTS_STORAGE_KEY, JSON.stringify(savedVaults));
+  }, [savedVaults]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
       return;
     }
-    window.localStorage.setItem(PINNED_RECIPIENTS_STORAGE_KEY, JSON.stringify(pinnedRecipients));
-  }, [pinnedRecipients]);
+    if (pinnedVaultPath) {
+      window.localStorage.setItem(PINNED_VAULT_PATH_STORAGE_KEY, pinnedVaultPath);
+      return;
+    }
+    window.localStorage.removeItem(PINNED_VAULT_PATH_STORAGE_KEY);
+  }, [pinnedVaultPath]);
+
+  useEffect(() => {
+    if (backendMode !== "tauri") {
+      return;
+    }
+
+    let unlisten: (() => void) | undefined;
+
+    void (async () => {
+      const storedSize = loadStoredWindowSize();
+      const { LogicalSize, getCurrentWindow } = await import("@tauri-apps/api/window");
+      const appWindow = getCurrentWindow();
+
+      if (storedSize) {
+        await appWindow.setSize(new LogicalSize(storedSize.width, storedSize.height));
+      }
+
+      unlisten = await appWindow.onResized(async () => {
+        const size = await appWindow.outerSize();
+        window.localStorage.setItem(
+          WINDOW_SIZE_STORAGE_KEY,
+          JSON.stringify({ width: size.width, height: size.height }),
+        );
+      });
+    })();
+
+    return () => {
+      unlisten?.();
+    };
+  }, [backendMode]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -683,11 +788,17 @@ export function App() {
     );
 
     if (!missingPinnedPrivate && missingPinnedRecipients.length === 0) {
+      void savePinnedKeySettings(sanitizedPinnedPrivate, sanitizedPinnedRecipients).catch(() => undefined);
       return;
     }
 
     void (async () => {
       try {
+        if (applyingPinnedSettingsRef.current) {
+          return;
+        }
+        applyingPinnedSettingsRef.current = true;
+
         if (sanitizedPinnedPrivate && selectedPrivate !== sanitizedPinnedPrivate) {
           await selectPrivateKey(sanitizedPinnedPrivate);
         }
@@ -700,6 +811,8 @@ export function App() {
         await Promise.all([refreshKeys(), refreshStatus()]);
       } catch {
         return;
+      } finally {
+        applyingPinnedSettingsRef.current = false;
       }
     })();
   }, [keys, pinnedPrivateKey, pinnedRecipients]);
@@ -864,6 +977,47 @@ export function App() {
     }
   }
 
+  async function persistPinnedSettings(
+    nextPrivateKeyFingerprint: string | null,
+    nextRecipientFingerprints: string[],
+  ) {
+    const normalizedRecipients = [...new Set(nextRecipientFingerprints)].sort();
+    await savePinnedKeySettings(nextPrivateKeyFingerprint, normalizedRecipients);
+    setPinnedPrivateKey(nextPrivateKeyFingerprint);
+    setPinnedRecipients(normalizedRecipients);
+  }
+
+  function upsertSavedVault(path: string, label: string) {
+    const trimmedPath = path.trim();
+    const trimmedLabel = label.trim() || deriveVaultLabel(trimmedPath);
+    if (!trimmedPath) {
+      return;
+    }
+
+    setSavedVaults((current) => {
+      const next = current.filter((vault) => vault.path !== trimmedPath);
+      next.push({ path: trimmedPath, label: trimmedLabel });
+      return next.sort((left, right) => left.label.localeCompare(right.label));
+    });
+  }
+
+  async function openVaultPath(path: string, label = "Opening vault...", recursive = status.recursive_scan) {
+    await withBusy(label, async () => {
+      const nextNotes = await openFolderVault(path, recursive);
+      setNotes(nextNotes);
+      setSelectedNote(null);
+      setEditorValue("");
+      setDirty(false);
+      await refreshStatus();
+    });
+  }
+
+  function openSaveVaultDialog(path: string, label?: string) {
+    setVaultPathInput(path);
+    setVaultLabelInput(label ?? deriveVaultLabel(path));
+    setIsVaultSaveDialogOpen(true);
+  }
+
   async function handleOpenFolder() {
     try {
       setError(null);
@@ -874,17 +1028,53 @@ export function App() {
       if (!selected || Array.isArray(selected)) {
         return;
       }
-      await withBusy("Opening vault...", async () => {
-        const nextNotes = await openFolderVault(selected, status.recursive_scan);
-        setNotes(nextNotes);
-        setSelectedNote(null);
-        setEditorValue("");
-        setDirty(false);
-        await refreshStatus();
-      });
+      await openVaultPath(selected, "Opening vault...");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
+  }
+
+  async function handleOpenSavedVault(vault: SavedVault) {
+    await openVaultPath(vault.path, `Opening ${vault.label}...`);
+  }
+
+  function handlePinCurrentVault() {
+    if (!status.vault_path) {
+      return;
+    }
+    setPinnedVaultPath((current) => (current === status.vault_path ? null : status.vault_path));
+  }
+
+  async function handleBrowseAndSaveVault() {
+    try {
+      setError(null);
+      const selected =
+        backendMode === "tauri"
+          ? await open({ directory: true, multiple: false, title: "Save Folder Vault" })
+          : window.prompt("Mock mode folder label", "Demo Vault");
+      if (!selected || Array.isArray(selected)) {
+        return;
+      }
+
+      openSaveVaultDialog(selected);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  function handleConfirmSaveVault() {
+    if (!vaultPathInput.trim()) {
+      return;
+    }
+
+    upsertSavedVault(vaultPathInput, vaultLabelInput);
+    setIsVaultSaveDialogOpen(false);
+    setVaultPathInput("");
+    setVaultLabelInput("");
+  }
+
+  function handleRemoveSavedVault(path: string) {
+    setSavedVaults((current) => current.filter((vault) => vault.path !== path));
   }
 
   async function handleImportKey() {
@@ -1218,7 +1408,7 @@ export function App() {
 
   async function handlePrivateKeySelection(fingerprint: string) {
     if (pinnedPrivateKey && pinnedPrivateKey !== fingerprint) {
-      setPinnedPrivateKey(null);
+      await persistPinnedSettings(null, pinnedRecipients);
     }
 
     await withBusy("Selecting private key...", async () => {
@@ -1230,7 +1420,10 @@ export function App() {
 
   async function handleRecipientSelection(fingerprint: string, checked: boolean) {
     if (!checked && pinnedRecipients.includes(fingerprint)) {
-      setPinnedRecipients((current) => current.filter((value) => value !== fingerprint));
+      await persistPinnedSettings(
+        pinnedPrivateKey,
+        pinnedRecipients.filter((value) => value !== fingerprint),
+      );
     }
 
     const next = checked
@@ -1271,7 +1464,7 @@ export function App() {
     }
 
     if (pinnedPrivateKey === key.fingerprint) {
-      setPinnedPrivateKey(null);
+      await persistPinnedSettings(null, pinnedRecipients);
       return;
     }
 
@@ -1279,12 +1472,15 @@ export function App() {
       await handlePrivateKeySelection(key.fingerprint);
     }
 
-    setPinnedPrivateKey(key.fingerprint);
+    await persistPinnedSettings(key.fingerprint, pinnedRecipients);
   }
 
   async function handleToggleRecipientPin(key: KeySummary) {
     if (pinnedRecipients.includes(key.fingerprint)) {
-      setPinnedRecipients((current) => current.filter((value) => value !== key.fingerprint));
+      await persistPinnedSettings(
+        pinnedPrivateKey,
+        pinnedRecipients.filter((value) => value !== key.fingerprint),
+      );
       return;
     }
 
@@ -1292,7 +1488,7 @@ export function App() {
       await handleRecipientSelection(key.fingerprint, true);
     }
 
-    setPinnedRecipients((current) => [...current, key.fingerprint].sort());
+    await persistPinnedSettings(pinnedPrivateKey, [...pinnedRecipients, key.fingerprint]);
   }
 
   async function handleRemoveKey(key: KeySummary) {
@@ -1312,8 +1508,10 @@ export function App() {
     await withBusy("Removing key...", async () => {
       await removeKey(key.fingerprint, key.has_secret);
       setKeyOrder((current) => current.filter((fingerprint) => fingerprint !== key.fingerprint));
-      setPinnedPrivateKey((current) => (current === key.fingerprint ? null : current));
-      setPinnedRecipients((current) => current.filter((fingerprint) => fingerprint !== key.fingerprint));
+      await persistPinnedSettings(
+        pinnedPrivateKey === key.fingerprint ? null : pinnedPrivateKey,
+        pinnedRecipients.filter((fingerprint) => fingerprint !== key.fingerprint),
+      );
       await refreshKeys();
       await refreshStatus();
       if (selectedNote) {
@@ -1445,6 +1643,36 @@ export function App() {
             </DialogContent>
           </Dialog>
 
+          <Dialog open={isVaultSaveDialogOpen} onOpenChange={setIsVaultSaveDialogOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Save Vault</DialogTitle>
+                <DialogDescription>
+                  Save a vault path so it can be reopened quickly from the header.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="flex flex-col gap-3">
+                <Input value={vaultLabelInput} onChange={(event) => setVaultLabelInput(event.target.value)} placeholder="Vault name" />
+                <Input value={vaultPathInput} onChange={(event) => setVaultPathInput(event.target.value)} placeholder="Vault path" />
+              </div>
+              <DialogFooter className="gap-2">
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    setIsVaultSaveDialogOpen(false);
+                    setVaultPathInput("");
+                    setVaultLabelInput("");
+                  }}
+                >
+                  Cancel
+                </Button>
+                <Button onClick={handleConfirmSaveVault} disabled={!vaultPathInput.trim()}>
+                  Save Vault
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
           <Dialog open={isExportDialogOpen} onOpenChange={setIsExportDialogOpen}>
             <DialogContent>
               <DialogHeader>
@@ -1567,6 +1795,92 @@ export function App() {
                       </div>
                     </DropdownMenuContent>
                   </DropdownMenu>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button size="sm" variant="secondary" className="min-w-[8.5rem] justify-start">
+                        <FolderPlus className="h-4 w-4" />
+                        Vaults
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start" side="bottom" className="w-80">
+                      <DropdownMenuLabel>Saved Vaults</DropdownMenuLabel>
+                      <DropdownMenuGroup>
+                        <DropdownMenuItem onClick={() => void handleBrowseAndSaveVault()}>
+                          <FolderPlus className="h-4 w-4" />
+                          Save Vault Path...
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          disabled={!status.vault_path}
+                          onClick={() => handlePinCurrentVault()}
+                        >
+                          <Pin
+                            className={cn(
+                              "h-4 w-4",
+                              status.vault_path && pinnedVaultPath === status.vault_path && "fill-white text-white",
+                            )}
+                          />
+                          {status.vault_path && pinnedVaultPath === status.vault_path
+                            ? "Unpin Current Vault"
+                            : "Pin Current Vault"}
+                        </DropdownMenuItem>
+                      </DropdownMenuGroup>
+                      <DropdownMenuSeparator />
+                      {savedVaults.length === 0 ? (
+                        <DropdownMenuItem disabled>No saved vaults yet</DropdownMenuItem>
+                      ) : (
+                        savedVaults.map((vault) => (
+                          <DropdownMenuItem
+                            key={vault.path}
+                            className="items-start"
+                            onClick={() => void handleOpenSavedVault(vault)}
+                            title={vault.path}
+                          >
+                            <FolderOpen className="mt-0.5 h-4 w-4" />
+                            <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                              <span className="truncate font-medium">{vault.label}</span>
+                              <span className="truncate text-xs text-muted-foreground">{vault.path}</span>
+                            </div>
+                            <div className="flex shrink-0 items-center gap-1">
+                              {pinnedVaultPath === vault.path ? (
+                                <Pin className="h-3.5 w-3.5 fill-white text-white" />
+                              ) : null}
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                className="size-7"
+                                onClick={(event) => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  openSaveVaultDialog(vault.path, vault.label);
+                                }}
+                                aria-label={`Edit ${vault.label}`}
+                                title="Edit vault name"
+                              >
+                                <Pencil className="h-3.5 w-3.5" />
+                              </Button>
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                className="size-7 text-muted-foreground hover:text-destructive"
+                                onClick={(event) => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  handleRemoveSavedVault(vault.path);
+                                }}
+                                aria-label={`Delete ${vault.label}`}
+                                title="Delete saved vault"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </div>
+                            {status.vault_path === vault.path ? (
+                              <Badge variant="outline" className="shrink-0">Open</Badge>
+                            ) : null}
+                          </DropdownMenuItem>
+                        ))
+                      )}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                   <Button size="sm" onClick={() => void handleOpenFolder()}>
                     <FolderOpen className="h-4 w-4" />
                     Open Vault
@@ -1588,11 +1902,12 @@ export function App() {
               </div>
 
               <div className="flex flex-wrap gap-2">
+                <div className="w-full rounded-lg border border-border/70 bg-background/40 px-3 py-2 text-xs text-muted-foreground">
+                  <span className="font-medium text-foreground">Current Vault Path:</span>{" "}
+                  <span className="break-all">{status.vault_path ?? "No vault selected"}</span>
+                </div>
                 <Badge variant={status.session_unlocked ? "default" : "secondary"}>
                   {status.session_unlocked ? "Unlocked" : "Locked"}
-                </Badge>
-                <Badge variant="outline">
-                  {status.vault_path ? activeVaultLabel(status.vault_kind) : "No vault"}
                 </Badge>
                 <Badge variant="outline">{notes.length} notes</Badge>
                 <Badge variant="outline">{recipientsLabel}</Badge>
@@ -1605,6 +1920,12 @@ export function App() {
                     value={passphrase}
                     onChange={(event) => setPassphrase(event.target.value)}
                     placeholder="Private key passphrase"
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && status.selected_private_key && passphrase) {
+                        event.preventDefault();
+                        void handleUnlock();
+                      }
+                    }}
                   />
                   <div className="flex items-center gap-3 rounded-lg border border-border/70 bg-background/40 px-3 py-2 text-xs text-muted-foreground">
                     <span className="truncate">

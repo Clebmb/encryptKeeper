@@ -1,15 +1,21 @@
 use std::path::PathBuf;
 
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 use crate::{
     app_state::AppState,
     errors::{AppError, AppResult},
     models::{
         ClipboardNoteContent, KeySummary, NoteEncryptionStatus, NoteRecipientInfo, OpenNoteResult,
-        SessionStatus,
+        PinnedKeySettings, SessionStatus,
     },
 };
+
+fn app_config_dir(app: &AppHandle) -> AppResult<PathBuf> {
+    app.path()
+        .app_config_dir()
+        .map_err(|cause| AppError::External(cause.to_string()))
+}
 
 #[tauri::command]
 pub fn get_status(state: State<'_, AppState>) -> AppResult<SessionStatus> {
@@ -311,6 +317,31 @@ pub fn list_keys(state: State<'_, AppState>) -> AppResult<Vec<KeySummary>> {
         .read()
         .map_err(|_| AppError::External("key manager lock poisoned".into()))?;
     Ok(key_manager.map_keys(keys))
+}
+
+#[tauri::command]
+pub fn get_pinned_key_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<PinnedKeySettings> {
+    let config_dir = app_config_dir(&app)?;
+    state.pinned_settings.load(&config_dir)
+}
+
+#[tauri::command]
+pub fn save_pinned_key_settings(
+    private_key_fingerprint: Option<String>,
+    recipient_fingerprints: Vec<String>,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<PinnedKeySettings> {
+    let config_dir = app_config_dir(&app)?;
+    let settings = PinnedKeySettings {
+        private_key_fingerprint,
+        recipient_fingerprints,
+    };
+    state.pinned_settings.save(&config_dir, &settings)?;
+    Ok(settings)
 }
 
 #[tauri::command]

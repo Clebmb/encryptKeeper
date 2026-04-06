@@ -37,6 +37,11 @@ export interface ClipboardNoteContent {
   was_decrypted: boolean;
 }
 
+export interface PinnedKeySettings {
+  private_key_fingerprint: string | null;
+  recipient_fingerprints: string[];
+}
+
 export interface NoteRecipientInfo {
   key_id: string;
   fingerprint: string | null;

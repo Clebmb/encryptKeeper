@@ -19,6 +19,12 @@ pub struct ClipboardNoteContent {
     pub was_decrypted: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PinnedKeySettings {
+    pub private_key_fingerprint: Option<String>,
+    pub recipient_fingerprints: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NoteRecipientInfo {
     pub key_id: String,

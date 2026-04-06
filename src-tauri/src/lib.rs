@@ -30,6 +30,8 @@ pub fn run() {
             commands::import_key_from_text,
             commands::create_key,
             commands::list_keys,
+            commands::get_pinned_key_settings,
+            commands::save_pinned_key_settings,
             commands::select_private_key,
             commands::export_public_key,
             commands::export_private_key,

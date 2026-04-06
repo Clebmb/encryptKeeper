@@ -34,6 +34,8 @@ pub enum AppError {
     Io(#[from] io::Error),
     #[error(transparent)]
     Utf8(#[from] FromUtf8Error),
+    #[error(transparent)]
+    SerdeJson(#[from] serde_json::Error),
     #[error("{0}")]
     External(String),
 }
