@@ -3,5 +3,12 @@
   "identifier": "default",
   "description": "Default desktop capability for the main encryptKeeper window.",
   "windows": ["main"],
-  "permissions": ["core:default", "core:window:allow-set-size", "dialog:default"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position",
+    "core:window:allow-set-focus",
+    "core:window:allow-show",
+    "dialog:default"
+  ]
 }

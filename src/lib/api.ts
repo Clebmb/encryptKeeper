@@ -2,6 +2,7 @@ import type {
   ClipboardNoteContent,
   KeySummary,
   NoteEncryptionStatus,
+  NoteSignatureStatus,
   NoteSummary,
   OpenNoteResult,
   PinnedKeySettings,
@@ -28,6 +29,11 @@ async function invokeOrMock<T>(command: string, args?: Record<string, unknown>):
         return mockBackend.refreshNotes() as Promise<T>;
       case "open_note":
         return mockBackend.openNote(String(args?.noteId ?? args?.note_id ?? "")) as Promise<T>;
+      case "open_note_with_password":
+        return mockBackend.openNoteWithPassword(
+          String(args?.noteId ?? args?.note_id ?? ""),
+          String(args?.password ?? ""),
+        ) as Promise<T>;
       case "resolve_clipboard_note_content":
         return mockBackend.resolveClipboardNoteContent(
           String(args?.rawContent ?? args?.raw_content ?? ""),
@@ -36,9 +42,24 @@ async function invokeOrMock<T>(command: string, args?: Record<string, unknown>):
         return mockBackend.saveNote(
           String(args?.noteId ?? args?.note_id ?? ""),
           String(args?.content ?? ""),
+          Boolean(args?.useSignature ?? args?.use_signature),
+        ) as Promise<T>;
+      case "save_note_with_password":
+        return mockBackend.saveNoteWithPassword(
+          String(args?.noteId ?? args?.note_id ?? ""),
+          String(args?.content ?? ""),
+          String(args?.password ?? ""),
         ) as Promise<T>;
       case "preview_pgp_block":
-        return mockBackend.previewPgpBlock(String(args?.content ?? "")) as Promise<T>;
+        return mockBackend.previewPgpBlock(
+          String(args?.content ?? ""),
+          Boolean(args?.useSignature ?? args?.use_signature),
+        ) as Promise<T>;
+      case "verify_clipboard_signature":
+        return mockBackend.verifyClipboardSignature(
+          String(args?.signatureText ?? args?.signature_text ?? ""),
+          String(args?.content ?? ""),
+        ) as Promise<T>;
       case "inspect_note_encryption":
         return mockBackend.inspectNoteEncryption(
           String(args?.noteId ?? args?.note_id ?? ""),
@@ -47,6 +68,13 @@ async function invokeOrMock<T>(command: string, args?: Record<string, unknown>):
         return mockBackend.createNote(
           String(args?.name ?? ""),
           String(args?.content ?? ""),
+          Boolean(args?.useSignature ?? args?.use_signature),
+        ) as Promise<T>;
+      case "create_note_with_password":
+        return mockBackend.createNoteWithPassword(
+          String(args?.name ?? ""),
+          String(args?.content ?? ""),
+          String(args?.password ?? ""),
         ) as Promise<T>;
       case "rename_note":
         return mockBackend.renameNote(
@@ -131,24 +159,59 @@ export async function openNote(noteId: string): Promise<OpenNoteResult> {
   return invokeOrMock("open_note", { noteId });
 }
 
+export async function openNoteWithPassword(noteId: string, password: string): Promise<OpenNoteResult> {
+  return invokeOrMock("open_note_with_password", { noteId, password });
+}
+
 export async function resolveClipboardNoteContent(rawContent: string): Promise<ClipboardNoteContent> {
   return invokeOrMock("resolve_clipboard_note_content", { rawContent });
 }
 
-export async function saveNote(noteId: string, content: string): Promise<void> {
-  return invokeOrMock("save_note", { noteId, content });
+export async function saveNote(
+  noteId: string,
+  content: string,
+  useSignature = false,
+): Promise<void> {
+  return invokeOrMock("save_note", { noteId, content, useSignature });
 }
 
-export async function previewPgpBlock(content: string): Promise<string> {
-  return invokeOrMock("preview_pgp_block", { content });
+export async function saveNoteWithPassword(
+  noteId: string,
+  content: string,
+  password: string,
+): Promise<void> {
+  return invokeOrMock("save_note_with_password", { noteId, content, password });
+}
+
+export async function previewPgpBlock(content: string, useSignature = false): Promise<string> {
+  return invokeOrMock("preview_pgp_block", { content, useSignature });
+}
+
+export async function verifyClipboardSignature(
+  signatureText: string,
+  content: string,
+): Promise<NoteSignatureStatus> {
+  return invokeOrMock("verify_clipboard_signature", { signatureText, content });
 }
 
 export async function inspectNoteEncryption(noteId: string): Promise<NoteEncryptionStatus> {
   return invokeOrMock("inspect_note_encryption", { noteId });
 }
 
-export async function createNote(name: string, content: string): Promise<NoteSummary> {
-  return invokeOrMock("create_note", { name, content });
+export async function createNote(
+  name: string,
+  content: string,
+  useSignature = false,
+): Promise<NoteSummary> {
+  return invokeOrMock("create_note", { name, content, useSignature });
+}
+
+export async function createNoteWithPassword(
+  name: string,
+  content: string,
+  password: string,
+): Promise<NoteSummary> {
+  return invokeOrMock("create_note_with_password", { name, content, password });
 }
 
 export async function renameNote(noteId: string, newName: string): Promise<NoteSummary> {

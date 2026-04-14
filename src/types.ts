@@ -35,6 +35,7 @@ export interface OpenNoteResult {
 export interface ClipboardNoteContent {
   content: string;
   was_decrypted: boolean;
+  signature: NoteSignatureStatus | null;
 }
 
 export interface PinnedKeySettings {
@@ -55,4 +56,13 @@ export interface NoteEncryptionStatus {
   recipients: NoteRecipientInfo[];
   can_decrypt_with_selected_key: boolean;
   matches_selected_recipients: boolean;
+  signature: NoteSignatureStatus;
+}
+
+export interface NoteSignatureStatus {
+  state: "none" | "good" | "bad" | "unknown";
+  signer_key_id: string | null;
+  signer_fingerprint: string | null;
+  signer_label: string | null;
+  summary: string;
 }

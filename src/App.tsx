@@ -84,21 +84,30 @@ import {
   lockSession,
   openFolderVault,
   openNote,
+  openNoteWithPassword,
   previewPgpBlock,
   refreshNotesFromVault,
   resolveClipboardNoteContent,
   removeKey,
   renameNote,
   saveNote,
+  saveNoteWithPassword,
   savePinnedKeySettings,
   selectPrivateKey,
   setRecipients,
   unlockSession,
   updatePreferences,
+  verifyClipboardSignature,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { normalizeNoteName } from "@/lib/noteName";
-import type { KeySummary, NoteEncryptionStatus, NoteSummary, SessionStatus } from "@/types";
+import type {
+  KeySummary,
+  NoteEncryptionStatus,
+  NoteSignatureStatus,
+  NoteSummary,
+  SessionStatus,
+} from "@/types";
 
 const defaultStatus: SessionStatus = {
   vault_kind: "none",
@@ -117,6 +126,13 @@ const defaultNoteEncryptionStatus: NoteEncryptionStatus = {
   recipients: [],
   can_decrypt_with_selected_key: false,
   matches_selected_recipients: true,
+  signature: {
+    state: "unknown",
+    signer_key_id: null,
+    signer_fingerprint: null,
+    signer_label: null,
+    summary: "Open a note to verify its signature.",
+  },
 };
 
 const KEY_ORDER_STORAGE_KEY = "encryptkeeper.key-order";
@@ -127,6 +143,10 @@ const AUTO_SHOW_PGP_BLOCK_STORAGE_KEY = "encryptkeeper.auto-show-pgp-block";
 const SAVED_VAULTS_STORAGE_KEY = "encryptkeeper.saved-vaults";
 const PINNED_VAULT_PATH_STORAGE_KEY = "encryptkeeper.pinned-vault-path";
 const WINDOW_SIZE_STORAGE_KEY = "encryptkeeper.window-size";
+const STARTUP_WINDOW_SIZE = {
+  width: 1040,
+  height: 560,
+};
 
 interface SavedVault {
   path: string;
@@ -318,6 +338,21 @@ function isPgpMessageBlock(value: string) {
   );
 }
 
+function isPgpSignedMessageBlock(value: string) {
+  return (
+    value.includes("-----BEGIN PGP SIGNED MESSAGE-----") &&
+    value.includes("-----BEGIN PGP SIGNATURE-----") &&
+    value.includes("-----END PGP SIGNATURE-----")
+  );
+}
+
+function isPgpSignatureBlock(value: string) {
+  return (
+    value.includes("-----BEGIN PGP SIGNATURE-----") &&
+    value.includes("-----END PGP SIGNATURE-----")
+  );
+}
+
 function isPgpKeyBlock(value: string) {
   return (
     (value.includes("-----BEGIN PGP PUBLIC KEY BLOCK-----") &&
@@ -325,6 +360,16 @@ function isPgpKeyBlock(value: string) {
     (value.includes("-----BEGIN PGP PRIVATE KEY BLOCK-----") &&
       value.includes("-----END PGP PRIVATE KEY BLOCK-----"))
   );
+}
+
+function signatureBadgeVariant(state: NoteEncryptionStatus["signature"]["state"]) {
+  if (state === "good") {
+    return "default";
+  }
+  if (state === "bad" || state === "unknown") {
+    return "secondary";
+  }
+  return "outline";
 }
 
 interface SortableKeyCardProps {
@@ -554,6 +599,7 @@ export function App() {
   const [autoShowPgpBlock, setAutoShowPgpBlock] = useState(() =>
     loadStoredBoolean(AUTO_SHOW_PGP_BLOCK_STORAGE_KEY, false),
   );
+  const [useSignature, setUseSignature] = useState(false);
   const [isCreateKeyOpen, setIsCreateKeyOpen] = useState(false);
   const [newKeyName, setNewKeyName] = useState("");
   const [newKeyEmail, setNewKeyEmail] = useState("");
@@ -692,12 +738,24 @@ export function App() {
     let unlisten: (() => void) | undefined;
 
     void (async () => {
-      const storedSize = loadStoredWindowSize();
-      const { LogicalSize, getCurrentWindow } = await import("@tauri-apps/api/window");
+      const { LogicalSize, PhysicalPosition, currentMonitor, getCurrentWindow, primaryMonitor } =
+        await import("@tauri-apps/api/window");
       const appWindow = getCurrentWindow();
 
-      if (storedSize) {
-        await appWindow.setSize(new LogicalSize(storedSize.width, storedSize.height));
+      try {
+        await appWindow.setSize(new LogicalSize(STARTUP_WINDOW_SIZE.width, STARTUP_WINDOW_SIZE.height));
+
+        const monitor = (await currentMonitor()) ?? (await primaryMonitor());
+        if (monitor) {
+          const size = await appWindow.outerSize();
+          const left = monitor.position.x + Math.max(0, Math.round((monitor.size.width - size.width) / 2));
+          const centeredTop = monitor.position.y + Math.round((monitor.size.height - size.height) / 2);
+          const top = Math.max(monitor.position.y, centeredTop);
+          await appWindow.setPosition(new PhysicalPosition(left, top));
+        }
+      } finally {
+        await appWindow.show();
+        await appWindow.setFocus();
       }
 
       unlisten = await appWindow.onResized(async () => {
@@ -878,7 +936,7 @@ export function App() {
     setPgpPreviewBusy(true);
 
     const timer = window.setTimeout(() => {
-      void previewPgpBlock(editorValue)
+      void previewPgpBlock(editorValue, useSignature || status.selected_recipients.length === 0)
         .then((block) => {
           if (previewRequestRef.current !== requestId) {
             return;
@@ -901,7 +959,14 @@ export function App() {
     }, 250);
 
     return () => window.clearTimeout(timer);
-  }, [editorValue, isPgpPreviewOpen, selectedNote, status.session_unlocked, status.selected_recipients]);
+  }, [
+    editorValue,
+    isPgpPreviewOpen,
+    selectedNote,
+    status.session_unlocked,
+    status.selected_recipients,
+    useSignature,
+  ]);
 
   useEffect(() => {
     if (!useClipboard) {
@@ -921,6 +986,8 @@ export function App() {
 
       const isRecognizedClipboardPayload =
         isPgpKeyBlock(trimmed) ||
+        isPgpSignedMessageBlock(trimmed) ||
+        isPgpSignatureBlock(trimmed) ||
         (isPgpMessageBlock(trimmed) && status.session_unlocked && Boolean(status.selected_private_key));
       if (!isRecognizedClipboardPayload) {
         return;
@@ -949,8 +1016,11 @@ export function App() {
     return notes.filter((note) => note.relative_path.toLowerCase().includes(needle));
   }, [notes, search]);
 
+  const useSignatureForOutput = useSignature || status.selected_recipients.length === 0;
   const recipientsLabel =
-    status.selected_recipients.length === 0
+    useSignatureForOutput
+      ? "Anyone"
+      : status.selected_recipients.length === 0
       ? "No recipients"
       : `${status.selected_recipients.length} recipient${status.selected_recipients.length === 1 ? "" : "s"}`;
 
@@ -962,6 +1032,18 @@ export function App() {
       return leftRank - rightRank;
     });
   }, [keyOrder, keys]);
+
+  const selectedRecipientLabels = useMemo(
+    () =>
+      status.selected_recipients.map((fingerprint) => {
+        const key = keys.find((entry) => entry.fingerprint === fingerprint);
+        return {
+          fingerprint,
+          label: key?.user_ids[0] ?? fingerprint,
+        };
+      }),
+    [keys, status.selected_recipients],
+  );
 
   async function withBusy<T>(label: string, work: () => Promise<T>) {
     setBusy(label);
@@ -1133,7 +1215,16 @@ export function App() {
 
   async function handleSelectNote(note: NoteSummary) {
     await withBusy(`Opening ${note.name}...`, async () => {
-      const opened = await openNote(note.id);
+      let opened: Awaited<ReturnType<typeof openNote>>;
+      try {
+        opened = await openNote(note.id);
+      } catch (cause) {
+        const password = window.prompt("Password for this note");
+        if (!password) {
+          throw cause;
+        }
+        opened = await openNoteWithPassword(note.id, password);
+      }
       setSelectedNote(opened.note);
       setEditorValue(opened.content);
       setDirty(false);
@@ -1149,7 +1240,7 @@ export function App() {
       return;
     }
     await withBusy(`Saving ${selectedNote.name}...`, async () => {
-      await saveNote(selectedNote.id, editorValue);
+      await saveNote(selectedNote.id, editorValue, useSignatureForOutput);
       setDirty(false);
       await refreshNotes();
       await refreshNoteEncryption(selectedNote.id);
@@ -1180,6 +1271,45 @@ export function App() {
       setError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function handleUseSignatureToggle(checked: boolean) {
+    if (!checked) {
+      if (selectedNote && status.session_unlocked && status.selected_recipients.length > 0) {
+        await withBusy("Encrypting note to selected recipients...", async () => {
+          await saveNote(selectedNote.id, editorValue, false);
+          setDirty(false);
+          await refreshNotes();
+          await refreshNoteEncryption(selectedNote.id);
+        });
+      }
+      setUseSignature(false);
+      return;
+    }
+
+    const message =
+      "Use Signature creates a clear-signed PGP signature. It is not encrypted to specific people, so anyone who can access the saved file or copied PGP block can read the note content. Continue?";
+    const approved =
+      backendMode === "tauri"
+        ? await confirm(message, {
+            title: "Use Signature",
+            kind: "warning",
+            okLabel: "Use Signature",
+            cancelLabel: "Cancel",
+          })
+        : window.confirm(message);
+
+    if (approved) {
+      setUseSignature(true);
+      if (selectedNote && status.session_unlocked) {
+        await withBusy("Saving note as a clear-signed signature...", async () => {
+          await saveNote(selectedNote.id, editorValue, true);
+          setDirty(false);
+          await refreshNotes();
+          await refreshNoteEncryption(selectedNote.id);
+        });
+      }
     }
   }
 
@@ -1283,13 +1413,33 @@ export function App() {
     }
     const normalized = normalizeNoteName(name);
     await withBusy(`Creating ${normalized}...`, async () => {
-      const created = await createNote(normalized, "");
+      const created = await createNote(normalized, "", useSignatureForOutput);
       await refreshNotes();
       await handleSelectNote(created);
     });
   }
 
-  async function createNoteFromPreparedClipboard(content: string, busyLabel: string) {
+  async function handleSaveWithPassword() {
+    if (!selectedNote) {
+      return;
+    }
+    const password = window.prompt("Password for this note");
+    if (!password) {
+      return;
+    }
+    await withBusy(`Saving ${selectedNote.name} with password...`, async () => {
+      await saveNoteWithPassword(selectedNote.id, editorValue, password);
+      setDirty(false);
+      await refreshNotes();
+      await refreshNoteEncryption(selectedNote.id);
+    });
+  }
+
+  async function createNoteFromPreparedClipboard(
+    content: string,
+    busyLabel: string,
+    clipboardSignature: NoteSignatureStatus | null = null,
+  ) {
     const name = window.prompt("New note name");
     if (!name) {
       return;
@@ -1297,9 +1447,15 @@ export function App() {
 
     const normalized = normalizeNoteName(name);
     await withBusy(busyLabel.replace("{name}", normalized), async () => {
-      const created = await createNote(normalized, content);
+      const created = await createNote(normalized, content, useSignatureForOutput);
       await refreshNotes();
       await handleSelectNote(created);
+      if (clipboardSignature) {
+        setNoteEncryptionStatus((current) => ({
+          ...current,
+          signature: clipboardSignature,
+        }));
+      }
     });
   }
 
@@ -1311,12 +1467,27 @@ export function App() {
         throw new Error("Clipboard is empty.");
       }
 
+      const trimmed = clipboardText.trim();
+      if (isPgpSignatureBlock(trimmed) && !isPgpSignedMessageBlock(trimmed)) {
+        if (!selectedNote) {
+          throw new Error("Open a note before verifying a detached PGP signature.");
+        }
+        const signature = await verifyClipboardSignature(trimmed, editorValue);
+        setNoteEncryptionStatus((current) => ({
+          ...current,
+          signature,
+        }));
+        setShowRecipients(true);
+        return;
+      }
+
       const prepared = await resolveClipboardNoteContent(clipboardText);
       await createNoteFromPreparedClipboard(
         prepared.content,
         prepared.was_decrypted
           ? "Creating {name} from decrypted clipboard message..."
           : "Creating {name} from clipboard...",
+        prepared.signature,
       );
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -1349,6 +1520,36 @@ export function App() {
       return true;
     }
 
+    if (isPgpSignedMessageBlock(trimmed)) {
+      const prepared = await resolveClipboardNoteContent(trimmed);
+      if (!prepared.was_decrypted) {
+        return false;
+      }
+
+      await createNoteFromPreparedClipboard(
+        prepared.content,
+        "Creating {name} from signed clipboard message...",
+        prepared.signature,
+      );
+      return true;
+    }
+
+    if (isPgpSignatureBlock(trimmed) && !isPgpSignedMessageBlock(trimmed)) {
+      if (!selectedNote) {
+        setError("Open a note before pasting a detached PGP signature.");
+        return true;
+      }
+
+      const signature = await verifyClipboardSignature(trimmed, editorValue);
+      setNoteEncryptionStatus((current) => ({
+        ...current,
+        signature,
+      }));
+      setShowRecipients(true);
+      setError(null);
+      return true;
+    }
+
     if (!isPgpMessageBlock(trimmed) || !status.session_unlocked || !status.selected_private_key) {
       return false;
     }
@@ -1361,6 +1562,7 @@ export function App() {
     await createNoteFromPreparedClipboard(
       prepared.content,
       "Creating {name} from decrypted clipboard message...",
+      prepared.signature,
     );
     return true;
   }
@@ -1429,16 +1631,17 @@ export function App() {
     const next = checked
       ? [...status.selected_recipients, fingerprint]
       : status.selected_recipients.filter((value) => value !== fingerprint);
+    const nextUsesSignature = useSignature || next.length === 0;
     await withBusy(
-      selectedNote && status.session_unlocked && next.length > 0
+      selectedNote && status.session_unlocked
         ? "Updating recipients and re-encrypting note..."
         : "Updating recipients...",
       async () => {
       setError(null);
       await setRecipients(next);
 
-      if (selectedNote && status.session_unlocked && next.length > 0) {
-        await saveNote(selectedNote.id, editorValue);
+      if (selectedNote && status.session_unlocked) {
+        await saveNote(selectedNote.id, editorValue, nextUsesSignature);
         setDirty(false);
         await refreshNotes();
       }
@@ -1449,11 +1652,6 @@ export function App() {
         await refreshNoteEncryption(selectedNote.id);
       }
 
-      if (selectedNote && status.session_unlocked && next.length === 0) {
-        setError(
-          "No recipients are selected. The open note was not re-encrypted and remains saved with its previous recipients until you select a recipient again.",
-        );
-      }
       },
     );
   }
@@ -1911,6 +2109,7 @@ export function App() {
                 </Badge>
                 <Badge variant="outline">{notes.length} notes</Badge>
                 <Badge variant="outline">{recipientsLabel}</Badge>
+                {useSignatureForOutput ? <Badge variant="outline">Signature mode</Badge> : null}
               </div>
 
               <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
@@ -2000,7 +2199,7 @@ export function App() {
             ) : null}
           </div>
 
-          <div className="grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
+          <div className="grid gap-4 md:grid-cols-[280px_minmax(0,1fr)]">
             <aside className="space-y-4">
               <Card className="border-white/10 bg-card/75">
                 <CardHeader className="space-y-3 pb-3">
@@ -2091,12 +2290,20 @@ export function App() {
                   <div>
                     <CardTitle className="text-base">Keys</CardTitle>
                   </div>
-                  <div className="grid grid-cols-[auto_auto] items-center gap-x-2 gap-y-2">
+                  <div className="grid grid-cols-[auto_auto_auto] items-center gap-x-2 gap-y-2">
                     <div className="row-span-2 flex items-center">
                       <Button variant="ghost" size="icon" onClick={() => void refreshKeys()}>
                         <RefreshCcw className="h-4 w-4" />
                       </Button>
                     </div>
+                    <label className="row-span-2 flex items-center gap-2 rounded-md border border-border/70 px-2 py-1 text-xs text-muted-foreground">
+                      <input
+                        type="checkbox"
+                        checked={useSignature}
+                        onChange={(event) => void handleUseSignatureToggle(event.target.checked)}
+                      />
+                      Use Signature
+                    </label>
                     <Button size="sm" variant="secondary" onClick={() => setIsCreateKeyOpen(true)}>
                       <Plus className="h-4 w-4" />
                       Create
@@ -2156,7 +2363,7 @@ export function App() {
               </Card>
             </aside>
 
-            <Card className="border-white/10 bg-card/75 lg:flex lg:min-h-[calc(100vh-12rem)] lg:flex-col">
+            <Card className="border-white/10 bg-card/75 md:flex md:min-h-[calc(100vh-12rem)] md:flex-col">
               <CardHeader className="space-y-3 pb-3">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="min-w-0">
@@ -2169,6 +2376,15 @@ export function App() {
                     <Button size="sm" onClick={() => void handleSave()} disabled={!dirty || !selectedNote}>
                       <Save className="h-4 w-4" />
                       Save
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => void handleSaveWithPassword()}
+                      disabled={!selectedNote}
+                    >
+                      <Lock className="h-4 w-4" />
+                      Password
                     </Button>
                     <Button
                       size="sm"
@@ -2206,15 +2422,15 @@ export function App() {
                   </div>
                 </div>
               </CardHeader>
-              <CardContent className="pt-0 lg:flex lg:flex-1 lg:flex-col">
+              <CardContent className="pt-0 md:flex md:flex-1 md:flex-col">
                 {selectedNote && showRecipients ? (
                   <div className="mb-3 rounded-xl border border-border/70 bg-background/50 p-3">
                     <div className="flex flex-col gap-2">
                       <div className="text-sm font-medium">Note Recipients</div>
                       <div className="flex flex-wrap gap-2">
-                        {noteEncryptionStatus.recipients.length === 0 ? (
-                          <Badge variant="secondary">No recipients detected</Badge>
-                        ) : (
+                        {useSignatureForOutput ? (
+                          <Badge variant="outline">Anyone</Badge>
+                        ) : noteEncryptionStatus.recipients.length > 0 ? (
                           noteEncryptionStatus.recipients.map((recipient) => (
                             <Badge
                               key={`${recipient.key_id}-${recipient.fingerprint ?? "unknown"}`}
@@ -2223,19 +2439,35 @@ export function App() {
                               {recipient.label}
                             </Badge>
                           ))
+                        ) : selectedRecipientLabels.length > 0 ? (
+                          selectedRecipientLabels.map((recipient) => (
+                            <Badge key={recipient.fingerprint} variant="default">
+                              {recipient.label}
+                            </Badge>
+                          ))
+                        ) : (
+                          <Badge variant="secondary">No recipients detected</Badge>
                         )}
                       </div>
                       <div className="text-xs text-muted-foreground">
-                        {noteEncryptionStatus.can_decrypt_with_selected_key
+                        {useSignatureForOutput
+                          ? "Signature mode is not encrypted to specific recipients."
+                          : noteEncryptionStatus.can_decrypt_with_selected_key
                           ? "The selected private key matches this note."
                           : "The selected private key does not match this note."}
                       </div>
-                      {!noteEncryptionStatus.matches_selected_recipients ? (
+                      {!useSignatureForOutput && !noteEncryptionStatus.matches_selected_recipients ? (
                         <div className="text-xs text-amber-200">
                           This file is currently encrypted to a different recipient set than the one selected above.
                           Changing recipients re-encrypts the open note immediately.
                         </div>
                       ) : null}
+                      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                        <Badge variant={signatureBadgeVariant(noteEncryptionStatus.signature.state)}>
+                          Signature: {noteEncryptionStatus.signature.state}
+                        </Badge>
+                        <span>{noteEncryptionStatus.signature.summary}</span>
+                      </div>
                     </div>
                   </div>
                 ) : null}
@@ -2272,7 +2504,7 @@ export function App() {
                   </div>
                 ) : null}
                 <Textarea
-                  className="min-h-[680px] rounded-xl bg-background/70 font-mono text-sm leading-6 lg:min-h-0 lg:flex-1"
+                  className="min-h-[360px] rounded-xl bg-background/70 font-mono text-sm leading-6 md:min-h-0 md:flex-1"
                   value={editorValue}
                   placeholder="Open or create a note to edit plaintext content here."
                   onChange={(event) => {

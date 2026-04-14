@@ -17,6 +17,7 @@ pub struct OpenNoteResult {
 pub struct ClipboardNoteContent {
     pub content: String,
     pub was_decrypted: bool,
+    pub signature: Option<NoteSignatureStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -40,6 +41,16 @@ pub struct NoteEncryptionStatus {
     pub recipients: Vec<NoteRecipientInfo>,
     pub can_decrypt_with_selected_key: bool,
     pub matches_selected_recipients: bool,
+    pub signature: NoteSignatureStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteSignatureStatus {
+    pub state: String,
+    pub signer_key_id: Option<String>,
+    pub signer_fingerprint: Option<String>,
+    pub signer_label: Option<String>,
+    pub summary: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

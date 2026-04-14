@@ -1,6 +1,8 @@
 import type {
+  ClipboardNoteContent,
   KeySummary,
   NoteEncryptionStatus,
+  NoteSignatureStatus,
   NoteSummary,
   OpenNoteResult,
   PinnedKeySettings,
@@ -110,6 +112,20 @@ function updateStore(mutator: (store: MockStore) => MockStore): MockStore {
   return next;
 }
 
+function mockSignature(store: MockStore): NoteSignatureStatus {
+  return {
+    state: store.status.selected_private_key ? "good" : "unknown",
+    signer_key_id: store.status.selected_private_key?.slice(-16) ?? null,
+    signer_fingerprint: store.status.selected_private_key,
+    signer_label:
+      store.keys.find((key) => key.fingerprint === store.status.selected_private_key)?.user_ids[0] ??
+      null,
+    summary: store.status.selected_private_key
+      ? "Good signature from the selected mock private key."
+      : "Unlock the session to verify this note's signature.",
+  };
+}
+
 export async function getStatus(): Promise<SessionStatus> {
   return getStore().status;
 }
@@ -150,10 +166,48 @@ export async function openNote(noteId: string): Promise<OpenNoteResult> {
   };
 }
 
+export async function openNoteWithPassword(noteId: string, password: string): Promise<OpenNoteResult> {
+  if (!password) {
+    throw new Error("Enter a password.");
+  }
+  const store = getStore();
+  const note = store.notes.find((entry) => entry.id === noteId);
+  if (!note) {
+    throw new Error("Note not found.");
+  }
+  return {
+    note,
+    content: note.content,
+  };
+}
+
 export async function resolveClipboardNoteContent(
   rawContent: string,
-): Promise<{ content: string; was_decrypted: boolean }> {
+): Promise<ClipboardNoteContent> {
   const store = getStore();
+  if (
+    rawContent.includes("-----BEGIN PGP SIGNED MESSAGE-----") &&
+    rawContent.includes("-----BEGIN PGP SIGNATURE-----")
+  ) {
+    const content = rawContent
+      .split(/\r?\n/)
+      .filter(
+        (line) =>
+          !line.startsWith("-----BEGIN PGP") &&
+          !line.startsWith("-----END PGP") &&
+          !line.startsWith("Hash:") &&
+          !line.startsWith("Version:") &&
+          !line.includes(":"),
+      )
+      .join("\n")
+      .trim();
+    return {
+      content: content || rawContent,
+      was_decrypted: true,
+      signature: mockSignature(store),
+    };
+  }
+
   if (
     store.status.session_unlocked &&
     store.status.selected_private_key &&
@@ -173,27 +227,63 @@ export async function resolveClipboardNoteContent(
     if (body.length > 0) {
       try {
         const decoded = decodeURIComponent(escape(atob(body.join(""))));
-        return { content: decoded, was_decrypted: true };
+        return {
+          content: decoded,
+          was_decrypted: true,
+          signature: {
+            ...mockSignature(store),
+          },
+        };
       } catch {
-        return { content: rawContent, was_decrypted: false };
+        return { content: rawContent, was_decrypted: false, signature: null };
       }
     }
   }
 
-  return { content: rawContent, was_decrypted: false };
+  return { content: rawContent, was_decrypted: false, signature: null };
 }
 
-export async function saveNote(noteId: string, content: string): Promise<void> {
+export async function saveNote(
+  noteId: string,
+  content: string,
+  _useSignature = false,
+): Promise<void> {
   updateStore((current) => ({
     ...current,
     notes: current.notes.map((note) => (note.id === noteId ? { ...note, content } : note)),
   }));
 }
 
-export async function previewPgpBlock(content: string): Promise<string> {
+export async function saveNoteWithPassword(
+  noteId: string,
+  content: string,
+  password: string,
+): Promise<void> {
+  if (!password) {
+    throw new Error("Enter a password.");
+  }
+  await saveNote(noteId, content);
+}
+
+export async function previewPgpBlock(content: string, useSignature = false): Promise<string> {
   const store = getStore();
   if (!store.status.session_unlocked) {
     throw new Error("Session is locked. Unlock the mock session first.");
+  }
+  if (!store.status.selected_private_key) {
+    throw new Error("Select a private key first.");
+  }
+  if (useSignature || store.status.selected_recipients.length === 0) {
+    return [
+      "-----BEGIN PGP SIGNED MESSAGE-----",
+      "Hash: SHA256",
+      "",
+      content || "",
+      "-----BEGIN PGP SIGNATURE-----",
+      "",
+      "mock-signature",
+      "-----END PGP SIGNATURE-----",
+    ].join("\n");
   }
   if (store.status.selected_recipients.length === 0) {
     throw new Error("Select at least one recipient first.");
@@ -208,6 +298,16 @@ export async function previewPgpBlock(content: string): Promise<string> {
     body || "=",
     "-----END PGP MESSAGE-----",
   ].join("\n");
+}
+
+export async function verifyClipboardSignature(
+  signatureText: string,
+  _content: string,
+): Promise<NoteSignatureStatus> {
+  if (!signatureText.includes("BEGIN PGP SIGNATURE")) {
+    throw new Error("Clipboard does not contain a PGP signature.");
+  }
+  return mockSignature(getStore());
 }
 
 export async function inspectNoteEncryption(_noteId: string): Promise<NoteEncryptionStatus> {
@@ -230,10 +330,15 @@ export async function inspectNoteEncryption(_noteId: string): Promise<NoteEncryp
       (recipient) => recipient.fingerprint === store.status.selected_private_key,
     ),
     matches_selected_recipients: true,
+    signature: mockSignature(store),
   };
 }
 
-export async function createNote(name: string, content: string): Promise<NoteSummary> {
+export async function createNote(
+  name: string,
+  content: string,
+  _useSignature = false,
+): Promise<NoteSummary> {
   const normalized = normalizeNoteName(name);
   const created: MockNoteRecord = {
     id: crypto.randomUUID(),
@@ -248,6 +353,17 @@ export async function createNote(name: string, content: string): Promise<NoteSum
     ),
   }));
   return created;
+}
+
+export async function createNoteWithPassword(
+  name: string,
+  content: string,
+  password: string,
+): Promise<NoteSummary> {
+  if (!password) {
+    throw new Error("Enter a password.");
+  }
+  return createNote(name, content);
 }
 
 export async function renameNote(noteId: string, newName: string): Promise<NoteSummary> {
