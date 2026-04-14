@@ -3,9 +3,10 @@
 # encryptKeeper
 Desktop app for managing encrypted `.gpg` text notes in a folder vault.
 
-<img width="812" height="424" alt="encryptkeeper_xEkANPyxde" src="https://github.com/user-attachments/assets/ce6cf4e1-01bd-45e4-b062-e96339c41489" />
+<img width="812" height="424" alt="encryptkeeper_xEkANPyxde" src="https://github.com/user-attachments/assets/b630c18b-1a72-478b-be7a-3bcf17c9bdba" />
 
-<img width="812" height="424" alt="encryptkeeper_K9GNQNV9N5" src="https://github.com/user-attachments/assets/1cc818b5-e16b-4782-aed1-f8b035ecb273" />
+<img width="812" height="424" alt="encryptkeeper_K9GNQNV9N5" src="https://github.com/user-attachments/assets/a68e9de5-ca68-4613-b139-aa765e35be8c" />
+
 
 ## Overview
 
