@@ -76,8 +76,6 @@ The app is built around folder-based vaults containing encrypted note files, wit
 - Press `Enter` in the passphrase field to unlock
 - Optional auto-save while unlocked
 - Configurable auto-lock timer, including fully disabled auto-lock
-- Remember the last resized window size between launches
-- Open with a compact default window height
 
 ## Preferences
 
