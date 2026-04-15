@@ -34,12 +34,15 @@ The app is built around folder-based vaults containing encrypted note files, wit
 - Save and preview clear-signed PGP signature notes when `Use Signature` is enabled or no recipients are selected
 - Create and save password-encrypted notes using GnuPG symmetric encryption
 - Decrypt notes with the currently selected private key after unlock
+- Signature verification for opened notes
+- Sign messaged (unencrypted) and decrypt signed messages
 - Open password-encrypted notes by entering the note password when prompted
 - Inspect note recipients and compare them with the current selected recipient set
 - Verify note signatures on open and show good, bad, missing, or unavailable signature status
 - Re-encrypt the currently open note when recipient selections change
 - Preview the generated armored PGP message block for the current note
 - Copy the generated PGP block directly from the preview panel
+
 
 ### Clipboard workflows
 
@@ -53,6 +56,7 @@ The app is built around folder-based vaults containing encrypted note files, wit
   - detect decryptable PGP message blocks and create a note from them
   - detect OpenPGP key blocks and offer to import them
 - Import OpenPGP keys from the clipboard
+- Import OpenPGP signed notes from the clipboard
 
 ### Key management
 
