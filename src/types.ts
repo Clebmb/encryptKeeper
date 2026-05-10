@@ -29,6 +29,17 @@ export interface KeySubkey {
 export interface KeyDetails {
   summary: KeySummary;
   subkeys: KeySubkey[];
+  certifications: KeyCertification[];
+}
+
+export interface KeyCertification {
+  signer_key_id: string;
+  signer_fingerprint: string | null;
+  signer_label: string;
+  subject_user_id: string | null;
+  created_at: number | null;
+  kind: string;
+  is_self_signature: boolean;
 }
 
 export interface NoteSummary {
@@ -94,4 +105,55 @@ export interface FileOperationResult {
   input_path: string;
   output_path: string;
   operation: string;
+}
+
+export interface ImportKeyResult {
+  imported: number;
+  unchanged: number;
+  secret_imported: number;
+  fingerprints: string[];
+  imported_fingerprints: string[];
+  unchanged_fingerprints: string[];
+  summary: string;
+}
+
+export interface KeyActionResult {
+  fingerprint: string;
+  summary: string;
+}
+
+export interface X509CertificateSummary {
+  fingerprint: string;
+  key_id: string;
+  subject: string;
+  issuer: string;
+  serial_number: string;
+  validity: string;
+  algorithm: string;
+  bits: number;
+  created_at: string | null;
+  expires_at: string | null;
+  has_secret: boolean;
+  is_trusted_root: boolean;
+}
+
+export interface SmartcardStatus {
+  available: boolean;
+  summary: string;
+  reader: string | null;
+  serial_number: string | null;
+  application_id: string | null;
+  manufacturer: string | null;
+  cardholder: string | null;
+  signature_key: string | null;
+  encryption_key: string | null;
+  authentication_key: string | null;
+}
+
+export interface KeyserverSearchResult {
+  fingerprint: string;
+  algorithm: string;
+  bits: number;
+  created_at: number | null;
+  user_ids: string[];
 }

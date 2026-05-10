@@ -35,6 +35,7 @@ import {
   Search,
   Shield,
   Trash2,
+  Upload,
   Unlock,
 } from "lucide-react";
 import { confirm, open, save as saveDialog } from "@tauri-apps/plugin-dialog";
@@ -70,39 +71,81 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
+  addSubkey,
+  certifyKey,
+  changeKeyPassphrase,
   createNote,
   createKey,
+  createX509Certificate,
+  decryptCmsFiles,
   decryptFiles,
   deleteNote,
+  encryptCmsFiles,
   encryptFiles,
+  exportRevocationCertificate,
+  exportOwnertrust,
   exportPrivateKey,
   exportPublicKey,
+  exportX509Certificate,
+  exportX509SecretKeyP12,
+  exportX509SecretKeyP8,
+  createSmartcardKeyStubs,
+  fetchSmartcardPublicKey,
+  factoryResetSmartcard,
+  generateSmartcardKey,
+  changeX509Passphrase,
+  deleteX509Certificate,
+  exportX509Trustlist,
+  getX509CertificateChain,
   getPinnedKeySettings,
   getBackendMode,
   getKeyDetails,
+  changeSmartcardPin,
+  importX509Crl,
+  setX509TrustRoot,
+  importKeyFromKeyserver,
+  getSmartcardStatus,
   getStatus,
   importKey,
   importKeyText,
+  importX509Certificate,
+  importX509CertificateText,
+  importOwnertrust,
+  importX509Trustlist,
   inspectNoteEncryption,
   listKeys,
+  learnX509Card,
+  listX509Certificates,
   listNotes,
   lockSession,
+  lookupKey,
+  openArchiveVault,
   openFolderVault,
+  publishKeyToKeyserver,
   openNote,
   openNoteWithPassword,
   previewPgpBlock,
+  refreshAllKeysFromKeyserver,
+  refreshKeyFromKeyserver,
+  restartSmartcardService,
   refreshNotesFromVault,
   resolveClipboardNoteContent,
   removeKey,
   renameNote,
   saveNote,
   saveNoteWithPassword,
+  searchKeyserver,
   savePinnedKeySettings,
   selectPrivateKey,
+  setKeyExpiry,
+  setKeyOwnertrust,
   setRecipients,
+  moveSecretKeyToSmartcard,
+  signCmsFiles,
   signFiles,
   unlockSession,
   updatePreferences,
+  verifyCmsFileSignature,
   verifyClipboardSignature,
   verifyFileSignature,
 } from "@/lib/api";
@@ -110,11 +153,16 @@ import { cn } from "@/lib/utils";
 import { normalizeNoteName } from "@/lib/noteName";
 import type {
   FileOperationResult,
+  ImportKeyResult,
+  KeyActionResult,
   KeyDetails,
   KeySummary,
+  KeyserverSearchResult,
   NoteEncryptionStatus,
   NoteSignatureStatus,
   NoteSummary,
+  SmartcardStatus,
+  X509CertificateSummary,
   SessionStatus,
 } from "@/types";
 
@@ -152,10 +200,54 @@ const AUTO_SHOW_PGP_BLOCK_STORAGE_KEY = "encryptkeeper.auto-show-pgp-block";
 const SAVED_VAULTS_STORAGE_KEY = "encryptkeeper.saved-vaults";
 const PINNED_VAULT_PATH_STORAGE_KEY = "encryptkeeper.pinned-vault-path";
 const WINDOW_SIZE_STORAGE_KEY = "encryptkeeper.window-size";
+const ACTIVITY_LOG_STORAGE_KEY = "encryptkeeper.activity-log";
 const STARTUP_WINDOW_SIZE = {
   width: 1040,
   height: 560,
 };
+
+const defaultSmartcardStatus: SmartcardStatus = {
+  available: false,
+  summary: "No smartcard or hardware token detected.",
+  reader: null,
+  serial_number: null,
+  application_id: null,
+  manufacturer: null,
+  cardholder: null,
+  signature_key: null,
+  encryption_key: null,
+  authentication_key: null,
+};
+
+const smartcardSlotOptions = [
+  { value: "OPENPGP.1", label: "Signing slot" },
+  { value: "OPENPGP.2", label: "Encryption slot" },
+  { value: "OPENPGP.3", label: "Authentication slot" },
+] as const;
+
+const smartcardAlgorithmOptions = [
+  { value: "rsa2048", label: "RSA 2048" },
+  { value: "rsa3072", label: "RSA 3072" },
+  { value: "rsa4096", label: "RSA 4096" },
+  { value: "ed25519", label: "Ed25519" },
+  { value: "cv25519", label: "Curve25519" },
+] as const;
+
+function defaultSmartcardSlotForCapabilities(capabilities: string[]) {
+  if (capabilities.includes("Encrypt")) {
+    return "OPENPGP.2";
+  }
+  if (capabilities.includes("Authenticate")) {
+    return "OPENPGP.3";
+  }
+  return "OPENPGP.1";
+}
+
+function defaultX509ExpiryDate(): string {
+  const nextYear = new Date();
+  nextYear.setFullYear(nextYear.getFullYear() + 1);
+  return nextYear.toISOString().slice(0, 10);
+}
 
 interface SavedVault {
   path: string;
@@ -167,13 +259,186 @@ interface StoredWindowSize {
   height: number;
 }
 
-type AppTab = "vault" | "keyring";
+type AppTab = "vault" | "files" | "keyring";
+type ActivityKind = "note" | "file" | "key" | "session";
+type FileCryptoMode = "openpgp" | "smime";
+
+interface ActivityItem {
+  id: string;
+  at: number;
+  kind: ActivityKind;
+  title: string;
+  detail: string;
+}
+
+const ownertrustOptions = [
+  { value: "undefined", label: "Unknown" },
+  { value: "never", label: "Never" },
+  { value: "marginal", label: "Marginal" },
+  { value: "full", label: "Full" },
+  { value: "ultimate", label: "Ultimate" },
+] as const;
+
+const subkeyPresetOptions = [
+  {
+    value: "encrypt",
+    label: "Encryption",
+    algorithm: "cv25519",
+    usage: "encr",
+  },
+  {
+    value: "sign",
+    label: "Signing",
+    algorithm: "ed25519",
+    usage: "sign",
+  },
+  {
+    value: "auth",
+    label: "Authentication",
+    algorithm: "ed25519",
+    usage: "auth",
+  },
+] as const;
 
 function formatTimestamp(epoch: number | null) {
   if (!epoch) {
     return "Never";
   }
   return new Date(epoch * 1000).toLocaleDateString();
+}
+
+function formatDateInput(epoch: number | null) {
+  if (!epoch) {
+    return "never";
+  }
+  return new Date(epoch * 1000).toISOString().slice(0, 10);
+}
+
+function ownertrustValueFromLabel(value: string) {
+  const normalized = value.trim().toLowerCase();
+  if (normalized.includes("ultimate")) {
+    return "ultimate";
+  }
+  if (normalized.includes("full")) {
+    return "full";
+  }
+  if (normalized.includes("marginal")) {
+    return "marginal";
+  }
+  if (normalized.includes("never")) {
+    return "never";
+  }
+  return "undefined";
+}
+
+function keyRoleSummary(key: KeySummary) {
+  if (key.is_selected_private) {
+    return "Active private key for decrypt, sign, and key-management actions.";
+  }
+  if (key.is_selected_recipient) {
+    return "Selected recipient for new encrypted notes and file operations.";
+  }
+  if (key.has_secret) {
+    return "Private key is available locally, but it is not the active decrypt/sign key.";
+  }
+  return "Public key only. Use it for recipients, trust decisions, or certification review.";
+}
+
+function keyTrustSummary(key: KeySummary) {
+  const trust = key.trust.trim().toLowerCase();
+  if (trust.includes("ultimate")) {
+    return "This key is fully trusted on this device.";
+  }
+  if (trust.includes("full")) {
+    return "This key is strongly trusted, but not marked ultimate.";
+  }
+  if (trust.includes("marginal")) {
+    return "This key has limited trust. Verify identity before relying on signatures.";
+  }
+  if (trust.includes("never")) {
+    return "This key is explicitly untrusted on this device.";
+  }
+  if (trust.includes("expired")) {
+    return "This key is expired. Refresh it or extend the expiration before use.";
+  }
+  if (trust.includes("revoked")) {
+    return "This key is revoked and should not be used.";
+  }
+  return "Trust has not been established yet. Review certifications and ownertrust.";
+}
+
+function keyStatusWarnings(key: KeySummary) {
+  const warnings: string[] = [];
+  if (key.expires_at && key.expires_at * 1000 < Date.now()) {
+    warnings.push("The key is expired.");
+  }
+  if (key.is_selected_private && !key.has_secret) {
+    warnings.push("The active private-key selection no longer has a local secret key.");
+  }
+  if (key.is_selected_recipient && !key.capabilities.includes("Encrypt")) {
+    warnings.push("This recipient key does not advertise encryption capability.");
+  }
+  if (!key.has_secret && key.capabilities.includes("Sign")) {
+    warnings.push("Only public material is available locally, so signing is not possible.");
+  }
+  return warnings;
+}
+
+function x509ValidationSummary(validity: string, report: string) {
+  const normalizedValidity = validity.trim().toLowerCase();
+  const normalizedReport = report.trim().toLowerCase();
+
+  if (!normalizedReport) {
+    return "Validation details are not available yet. Run validation or refresh the certificate view.";
+  }
+  if (normalizedReport.includes("revoked")) {
+    return "Validation reports this certificate as revoked. Do not rely on it.";
+  }
+  if (normalizedReport.includes("expired")) {
+    return "Validation reports this certificate as expired. Renew or replace it before use.";
+  }
+  if (normalizedReport.includes("no issuer") || normalizedReport.includes("missing issuer")) {
+    return "Validation could not build a complete issuer chain for this certificate.";
+  }
+  if (normalizedReport.includes("crl") && normalizedReport.includes("error")) {
+    return "Validation ran, but revocation status could not be confirmed cleanly.";
+  }
+  if (
+    normalizedReport.includes("certificate is good")
+    || normalizedReport.includes("root certificate is good")
+    || normalizedReport.includes("trusted")
+  ) {
+    return "Validation completed without an obvious trust or revocation failure in the reported chain.";
+  }
+  if (normalizedValidity.includes("full") || normalizedValidity.includes("ultimate")) {
+    return "This certificate currently looks usable, but review the reported chain before relying on it.";
+  }
+  if (normalizedValidity.includes("expired")) {
+    return "This certificate is expired based on the local certificate store state.";
+  }
+  if (normalizedValidity.includes("revoked")) {
+    return "This certificate is marked revoked in the local certificate store.";
+  }
+  return "Validation completed, but the chain report should be reviewed for issuer and revocation details.";
+}
+
+function formatActivityTime(epochMs: number) {
+  return new Date(epochMs).toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function activityBadgeVariant(kind: ActivityKind) {
+  if (kind === "key") {
+    return "default";
+  }
+  if (kind === "file") {
+    return "secondary";
+  }
+  return "outline";
 }
 
 function filePathLabel(path: string) {
@@ -321,6 +586,33 @@ function loadStoredWindowSize() {
     };
   } catch {
     return null;
+  }
+}
+
+function loadActivityLog() {
+  if (typeof window === "undefined") {
+    return [] as ActivityItem[];
+  }
+
+  try {
+    const raw = window.localStorage.getItem(ACTIVITY_LOG_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) {
+      return [] as ActivityItem[];
+    }
+
+    return parsed.filter(
+      (value): value is ActivityItem =>
+        typeof value === "object" &&
+        value !== null &&
+        typeof value.id === "string" &&
+        typeof value.at === "number" &&
+        typeof value.kind === "string" &&
+        typeof value.title === "string" &&
+        typeof value.detail === "string",
+    );
+  } catch {
+    return [] as ActivityItem[];
   }
 }
 
@@ -598,9 +890,38 @@ export function App() {
   const [selectedKeyFingerprint, setSelectedKeyFingerprint] = useState<string | null>(null);
   const [selectedKeyDetails, setSelectedKeyDetails] = useState<KeyDetails | null>(null);
   const [isLoadingKeyDetails, setIsLoadingKeyDetails] = useState(false);
+  const [smartcardStatus, setSmartcardStatus] = useState<SmartcardStatus>(defaultSmartcardStatus);
+  const [x509Certificates, setX509Certificates] = useState<X509CertificateSummary[]>([]);
+  const [selectedX509Fingerprint, setSelectedX509Fingerprint] = useState<string | null>(null);
+  const [selectedX509Chain, setSelectedX509Chain] = useState("");
+  const [selectedX509SignerFingerprint, setSelectedX509SignerFingerprint] = useState<string | null>(null);
+  const [selectedX509Recipients, setSelectedX509Recipients] = useState<string[]>([]);
+  const [isLoadingSmartcardStatus, setIsLoadingSmartcardStatus] = useState(false);
+  const [isSmartcardGenerateDialogOpen, setIsSmartcardGenerateDialogOpen] = useState(false);
+  const [smartcardGenerateSlot, setSmartcardGenerateSlot] =
+    useState<(typeof smartcardSlotOptions)[number]["value"]>("OPENPGP.1");
+  const [smartcardGenerateAlgorithm, setSmartcardGenerateAlgorithm] =
+    useState<(typeof smartcardAlgorithmOptions)[number]["value"]>("rsa3072");
+  const [smartcardGenerateForce, setSmartcardGenerateForce] = useState(false);
+  const [isSmartcardStoreDialogOpen, setIsSmartcardStoreDialogOpen] = useState(false);
+  const [smartcardStoreFingerprint, setSmartcardStoreFingerprint] = useState("");
+  const [smartcardStoreSlot, setSmartcardStoreSlot] =
+    useState<(typeof smartcardSlotOptions)[number]["value"]>("OPENPGP.1");
+  const [smartcardStoreForce, setSmartcardStoreForce] = useState(false);
+  const [isCreateX509DialogOpen, setIsCreateX509DialogOpen] = useState(false);
+  const [isPasteX509DialogOpen, setIsPasteX509DialogOpen] = useState(false);
+  const [pastedX509CertificateText, setPastedX509CertificateText] = useState("");
+  const [newX509CommonName, setNewX509CommonName] = useState("");
+  const [newX509Organization, setNewX509Organization] = useState("");
+  const [newX509Email, setNewX509Email] = useState("");
+  const [newX509Expiry, setNewX509Expiry] = useState(() => defaultX509ExpiryDate());
+  const [newX509Passphrase, setNewX509Passphrase] = useState("");
+  const [isCreatingX509Certificate, setIsCreatingX509Certificate] = useState(false);
+  const [keySearch, setKeySearch] = useState("");
   const [notes, setNotes] = useState<NoteSummary[]>([]);
   const [selectedFilePaths, setSelectedFilePaths] = useState<string[]>([]);
   const [fileOutputDir, setFileOutputDir] = useState("");
+  const [fileCryptoMode, setFileCryptoMode] = useState<FileCryptoMode>("openpgp");
   const [fileOperationResults, setFileOperationResults] = useState<FileOperationResult[]>([]);
   const [verifyInputPath, setVerifyInputPath] = useState("");
   const [verifySignaturePath, setVerifySignaturePath] = useState("");
@@ -648,6 +969,21 @@ export function App() {
   const [exportMode, setExportMode] = useState<"private" | "both">("private");
   const [exportTargetKey, setExportTargetKey] = useState<KeySummary | null>(null);
   const [exportPassphrase, setExportPassphrase] = useState("");
+  const [isKeyToolsOpen, setIsKeyToolsOpen] = useState(false);
+  const [isLookupDialogOpen, setIsLookupDialogOpen] = useState(false);
+  const [lookupQuery, setLookupQuery] = useState("");
+  const [keyserverResults, setKeyserverResults] = useState<KeyserverSearchResult[]>([]);
+  const [isSearchingKeyserver, setIsSearchingKeyserver] = useState(false);
+  const [keyExpiryInput, setKeyExpiryInput] = useState("");
+  const [ownertrustInput, setOwnertrustInput] = useState("undefined");
+  const [subkeyPreset, setSubkeyPreset] = useState<(typeof subkeyPresetOptions)[number]["value"]>("encrypt");
+  const [subkeyExpireInput, setSubkeyExpireInput] = useState("1y");
+  const [newKeyPassphraseInput, setNewKeyPassphraseInput] = useState("");
+  const [confirmKeyPassphraseInput, setConfirmKeyPassphraseInput] = useState("");
+  const [revocationPassphrase, setRevocationPassphrase] = useState("");
+  const [latestImportResult, setLatestImportResult] = useState<ImportKeyResult | null>(null);
+  const [latestKeyAction, setLatestKeyAction] = useState<KeyActionResult | null>(null);
+  const [activityLog, setActivityLog] = useState<ActivityItem[]>(() => loadActivityLog());
   const [keyOrder, setKeyOrder] = useState<string[]>(() => loadStoredKeyOrder());
   const [pinnedPrivateKey, setPinnedPrivateKey] = useState<string | null>(null);
   const [pinnedRecipients, setPinnedRecipients] = useState<string[]>([]);
@@ -672,6 +1008,28 @@ export function App() {
 
   async function refreshKeys() {
     setKeys(await listKeys());
+  }
+
+  async function refreshSmartcardStatus() {
+    setIsLoadingSmartcardStatus(true);
+    try {
+      const next = await getSmartcardStatus();
+      setSmartcardStatus(next);
+      return next;
+    } finally {
+      setIsLoadingSmartcardStatus(false);
+    }
+  }
+
+  async function refreshX509Certificates() {
+    const certificates = await listX509Certificates();
+    setX509Certificates(certificates);
+    setSelectedX509Fingerprint((current) => {
+      if (current && certificates.some((certificate) => certificate.fingerprint === current)) {
+        return current;
+      }
+      return certificates[0]?.fingerprint ?? null;
+    });
   }
 
   async function refreshNotes() {
@@ -705,6 +1063,8 @@ export function App() {
           getPinnedKeySettings(),
           refreshStatus(),
           refreshKeys(),
+          refreshX509Certificates(),
+          refreshSmartcardStatus(),
           refreshNotes(),
         ]);
         setPinnedPrivateKey(pinnedSettings.private_key_fingerprint);
@@ -785,12 +1145,30 @@ export function App() {
     if (typeof window === "undefined") {
       return;
     }
+    window.localStorage.setItem(ACTIVITY_LOG_STORAGE_KEY, JSON.stringify(activityLog));
+  }, [activityLog]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
     if (pinnedVaultPath) {
       window.localStorage.setItem(PINNED_VAULT_PATH_STORAGE_KEY, pinnedVaultPath);
       return;
     }
     window.localStorage.removeItem(PINNED_VAULT_PATH_STORAGE_KEY);
   }, [pinnedVaultPath]);
+
+  useEffect(() => {
+    if (!selectedX509Fingerprint) {
+      setSelectedX509Chain("");
+      return;
+    }
+
+    void getX509CertificateChain(selectedX509Fingerprint)
+      .then((chain) => setSelectedX509Chain(chain))
+      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+  }, [selectedX509Fingerprint]);
 
   useEffect(() => {
     if (backendMode !== "tauri") {
@@ -1094,6 +1472,20 @@ export function App() {
       return leftRank - rightRank;
     });
   }, [keyOrder, keys]);
+  const filteredOrderedKeys = useMemo(() => {
+    const needle = keySearch.trim().toLowerCase();
+    if (!needle) {
+      return orderedKeys;
+    }
+    return orderedKeys.filter((key) => {
+      const primaryId = key.user_ids.join(" ").toLowerCase();
+      return (
+        primaryId.includes(needle) ||
+        key.fingerprint.toLowerCase().includes(needle) ||
+        key.key_id.toLowerCase().includes(needle)
+      );
+    });
+  }, [keySearch, orderedKeys]);
 
   const selectedRecipientLabels = useMemo(
     () =>
@@ -1110,6 +1502,72 @@ export function App() {
     () => keys.find((key) => key.fingerprint === selectedKeyFingerprint) ?? null,
     [keys, selectedKeyFingerprint],
   );
+  const latestImportedKeys = useMemo(
+    () =>
+      (latestImportResult?.imported_fingerprints ?? [])
+        .map((fingerprint) => keys.find((key) => key.fingerprint === fingerprint))
+        .filter((key): key is KeySummary => Boolean(key)),
+    [keys, latestImportResult],
+  );
+  const latestUnchangedKeys = useMemo(
+    () =>
+      (latestImportResult?.unchanged_fingerprints ?? [])
+        .map((fingerprint) => keys.find((key) => key.fingerprint === fingerprint))
+        .filter((key): key is KeySummary => Boolean(key)),
+    [keys, latestImportResult],
+  );
+  const selectedX509Certificate = useMemo(
+    () =>
+      x509Certificates.find((certificate) => certificate.fingerprint === selectedX509Fingerprint) ?? null,
+    [selectedX509Fingerprint, x509Certificates],
+  );
+  const selectedX509RecipientLabels = useMemo(
+    () =>
+      selectedX509Recipients.map((fingerprint) => {
+        const certificate = x509Certificates.find((entry) => entry.fingerprint === fingerprint);
+        return {
+          fingerprint,
+          label: certificate?.subject ?? fingerprint,
+        };
+      }),
+    [selectedX509Recipients, x509Certificates],
+  );
+  const smartcardMovableKeyOptions = useMemo(() => {
+    if (!selectedKeyDetails) {
+      return [] as Array<{
+        fingerprint: string;
+        label: string;
+        slot: (typeof smartcardSlotOptions)[number]["value"];
+      }>;
+    }
+
+    const options: Array<{
+      fingerprint: string;
+      label: string;
+      slot: (typeof smartcardSlotOptions)[number]["value"];
+    }> = [];
+
+    if (selectedKeyDetails.summary.has_secret) {
+      options.push({
+        fingerprint: selectedKeyDetails.summary.fingerprint,
+        label: `${selectedKeyDetails.summary.user_ids[0] ?? "Primary key"} (${selectedKeyDetails.summary.capabilities.join("/") || "primary"})`,
+        slot: defaultSmartcardSlotForCapabilities(selectedKeyDetails.summary.capabilities),
+      });
+    }
+
+    for (const subkey of selectedKeyDetails.subkeys) {
+      if (!subkey.has_secret) {
+        continue;
+      }
+      options.push({
+        fingerprint: subkey.fingerprint,
+        label: `${subkey.algorithm} ${subkey.capabilities.join("/") || "subkey"} (${formatFingerprint(subkey.fingerprint)})`,
+        slot: defaultSmartcardSlotForCapabilities(subkey.capabilities),
+      });
+    }
+
+    return options;
+  }, [selectedKeyDetails]);
 
   async function withBusy<T>(label: string, work: () => Promise<T>) {
     setBusy(label);
@@ -1157,6 +1615,23 @@ export function App() {
       setEditorValue("");
       setDirty(false);
       await refreshStatus();
+      recordActivity("note", "Opened folder vault", path);
+    });
+  }
+
+  async function openArchivePath(
+    path: string,
+    label = "Opening archive vault...",
+    recursive = status.recursive_scan,
+  ) {
+    await withBusy(label, async () => {
+      const nextNotes = await openArchiveVault(path, recursive);
+      setNotes(nextNotes);
+      setSelectedNote(null);
+      setEditorValue("");
+      setDirty(false);
+      await refreshStatus();
+      recordActivity("note", "Opened archive vault", path);
     });
   }
 
@@ -1183,6 +1658,10 @@ export function App() {
   }
 
   async function handleOpenSavedVault(vault: SavedVault) {
+    if (vault.path.toLowerCase().endsWith(".zip")) {
+      await openArchivePath(vault.path, `Opening ${vault.label}...`);
+      return;
+    }
     await openVaultPath(vault.path, `Opening ${vault.label}...`);
   }
 
@@ -1242,8 +1721,24 @@ export function App() {
       }
       await withBusy("Importing key...", async () => {
         const paths = Array.isArray(selected) ? selected : [selected];
+        const summaries: string[] = [];
         for (const path of paths) {
-          await importKey(path);
+          const result = await importKey(path);
+          summaries.push(result.summary);
+          setLatestImportResult(result);
+          focusImportedKey(result);
+          recordActivity("key", "Imported key file", `${filePathLabel(path)}. ${result.summary}`);
+        }
+        if (summaries.length > 1) {
+          setLatestImportResult({
+            imported: 0,
+            unchanged: 0,
+            secret_imported: 0,
+            fingerprints: [],
+            imported_fingerprints: [],
+            unchanged_fingerprints: [],
+            summary: summaries.join(" "),
+          });
         }
         await refreshKeys();
         await refreshStatus();
@@ -1262,7 +1757,10 @@ export function App() {
       }
 
       await withBusy("Importing key from clipboard...", async () => {
-        await importKeyText(clipboardText);
+        const result = await importKeyText(clipboardText);
+        setLatestImportResult(result);
+        focusImportedKey(result);
+        recordActivity("key", "Imported key from clipboard", result.summary);
         await refreshKeys();
         await refreshStatus();
       });
@@ -1271,11 +1769,99 @@ export function App() {
     }
   }
 
+  async function handleOpenArchive() {
+    try {
+      setError(null);
+      const selected =
+        backendMode === "tauri"
+          ? await open({
+              directory: false,
+              multiple: false,
+              title: "Open Archive Vault",
+              filters: [{ name: "ZIP archives", extensions: ["zip"] }],
+            })
+          : window.prompt("Mock mode archive vault", "demo-vault.zip");
+      if (!selected || Array.isArray(selected)) {
+        return;
+      }
+
+      await openArchivePath(selected, "Opening archive vault...");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  function recordActivity(kind: ActivityKind, title: string, detail: string) {
+    const entry: ActivityItem = {
+      id: crypto.randomUUID(),
+      at: Date.now(),
+      kind,
+      title,
+      detail,
+    };
+    setActivityLog((current) => [entry, ...current].slice(0, 30));
+  }
+
+  function focusImportedKey(result: ImportKeyResult) {
+    const first =
+      result.imported_fingerprints[0] ??
+      result.unchanged_fingerprints[0] ??
+      result.fingerprints[0];
+    if (first) {
+      setSelectedKeyFingerprint(first);
+      setActiveTab("keyring");
+    }
+  }
+
+  async function handleLookupKey() {
+    if (!lookupQuery.trim()) {
+      return;
+    }
+
+    await withBusy("Looking up keys...", async () => {
+      const result = await lookupKey(lookupQuery.trim());
+      setLatestImportResult(result);
+      focusImportedKey(result);
+      recordActivity("key", "Looked up public key", result.summary);
+      setIsLookupDialogOpen(false);
+      setLookupQuery("");
+      await refreshKeys();
+      await refreshStatus();
+    });
+  }
+
+  async function handleSearchKeyserver() {
+    if (!lookupQuery.trim()) {
+      return;
+    }
+
+    setIsSearchingKeyserver(true);
+    try {
+      setKeyserverResults(await searchKeyserver(lookupQuery.trim()));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setIsSearchingKeyserver(false);
+    }
+  }
+
+  async function handleImportKeyserverResult(fingerprint: string) {
+    await withBusy("Importing key from keyserver...", async () => {
+      const result = await importKeyFromKeyserver(fingerprint);
+      setLatestImportResult(result);
+      focusImportedKey(result);
+      recordActivity("key", "Imported key from keyserver", result.summary);
+      await refreshKeys();
+      await refreshStatus();
+    });
+  }
+
   async function handleUnlock() {
     await withBusy("Unlocking session...", async () => {
       await unlockSession(passphrase);
       setPassphrase("");
       await refreshStatus();
+      recordActivity("session", "Unlocked session", "Private-key operations are available.");
     });
   }
 
@@ -1298,6 +1884,7 @@ export function App() {
       setIsPgpPreviewOpen(autoShowPgpBlock);
       await refreshNoteEncryption(opened.note.id);
       await refreshStatus();
+      recordActivity("note", "Opened note", opened.note.relative_path);
     });
   }
 
@@ -1310,6 +1897,11 @@ export function App() {
       setDirty(false);
       await refreshNotes();
       await refreshNoteEncryption(selectedNote.id);
+      recordActivity(
+        "note",
+        useSignatureForOutput ? "Saved signed note" : "Saved encrypted note",
+        selectedNote.relative_path,
+      );
     });
   }
 
@@ -1396,6 +1988,7 @@ export function App() {
         setNewKeyPassphrase("");
         await refreshKeys();
         await refreshStatus();
+        recordActivity("key", "Created keypair", `${newKeyName.trim()} <${newKeyEmail.trim()}>`);
       });
     } finally {
       createKeyInFlightRef.current = false;
@@ -1418,6 +2011,7 @@ export function App() {
 
     await withBusy("Exporting public key...", async () => {
       await exportPublicKey(key.fingerprint, outputPath);
+      recordActivity("key", "Exported public key", `${keyDisplayName(key)} to ${filePathLabel(outputPath)}`);
     });
   }
 
@@ -1448,6 +2042,11 @@ export function App() {
 
       await withBusy("Exporting private key...", async () => {
         await exportPrivateKey(exportTargetKey.fingerprint, exportPassphrase, outputPath);
+        recordActivity(
+          "key",
+          "Exported private key",
+          `${keyDisplayName(exportTargetKey)} to ${filePathLabel(outputPath)}`,
+        );
       });
     } else {
       const destination =
@@ -1464,12 +2063,607 @@ export function App() {
       await withBusy("Exporting public and private keys...", async () => {
         await exportPublicKey(exportTargetKey.fingerprint, publicPath);
         await exportPrivateKey(exportTargetKey.fingerprint, exportPassphrase, privatePath);
+        recordActivity(
+          "key",
+          "Exported keypair",
+          `${keyDisplayName(exportTargetKey)} to ${filePathLabel(publicPath)} and ${filePathLabel(privatePath)}`,
+        );
       });
     }
 
     setIsExportDialogOpen(false);
     setExportTargetKey(null);
     setExportPassphrase("");
+  }
+
+  function openKeyToolsDialog() {
+    if (!selectedKeySummary) {
+      return;
+    }
+    setKeyExpiryInput(formatDateInput(selectedKeySummary.expires_at));
+    setOwnertrustInput(ownertrustValueFromLabel(selectedKeySummary.trust));
+    setSubkeyPreset("encrypt");
+    setSubkeyExpireInput("1y");
+    setNewKeyPassphraseInput("");
+    setConfirmKeyPassphraseInput("");
+    setRevocationPassphrase("");
+    setIsKeyToolsOpen(true);
+  }
+
+  async function handleSaveKeyExpiry() {
+    if (!selectedKeySummary || !keyExpiryInput.trim()) {
+      return;
+    }
+    await withBusy("Updating key expiration...", async () => {
+      const result = await setKeyExpiry(selectedKeySummary.fingerprint, keyExpiryInput.trim());
+      setLatestKeyAction(result);
+      await refreshKeys();
+      await refreshStatus();
+      recordActivity("key", "Updated key expiration", result.summary);
+    });
+  }
+
+  async function handleSaveOwnertrust() {
+    if (!selectedKeySummary) {
+      return;
+    }
+    await withBusy("Updating key trust...", async () => {
+      const result = await setKeyOwnertrust(selectedKeySummary.fingerprint, ownertrustInput);
+      setLatestKeyAction(result);
+      await refreshKeys();
+      await refreshStatus();
+      recordActivity("key", "Updated ownertrust", result.summary);
+    });
+  }
+
+  async function handleCertifySelectedKey(localOnly: boolean) {
+    if (!selectedKeySummary) {
+      return;
+    }
+    await withBusy(localOnly ? "Adding local certification..." : "Certifying key...", async () => {
+      const result = await certifyKey(selectedKeySummary.fingerprint, localOnly);
+      setLatestKeyAction(result);
+      await refreshKeys();
+      await refreshStatus();
+      recordActivity("key", localOnly ? "Local certification added" : "Certified key", result.summary);
+    });
+  }
+
+  async function handlePublishSelectedKey() {
+    if (!selectedKeySummary) {
+      return;
+    }
+    await withBusy("Publishing key to keyserver...", async () => {
+      const result = await publishKeyToKeyserver(selectedKeySummary.fingerprint);
+      setLatestKeyAction(result);
+      recordActivity("key", "Published key", result.summary);
+    });
+  }
+
+  async function handleRefreshSelectedKey() {
+    if (!selectedKeySummary) {
+      return;
+    }
+    await withBusy("Refreshing key from keyserver...", async () => {
+      const result = await refreshKeyFromKeyserver(selectedKeySummary.fingerprint);
+      setLatestKeyAction(result);
+      await refreshKeys();
+      await refreshStatus();
+      recordActivity("key", "Refreshed key", result.summary);
+    });
+  }
+
+  async function handleRefreshAllKeys() {
+    await withBusy("Refreshing keyring from keyserver...", async () => {
+      const result = await refreshAllKeysFromKeyserver();
+      setLatestKeyAction(result);
+      await refreshKeys();
+      await refreshStatus();
+      recordActivity("key", "Refreshed keyring", result.summary);
+    });
+  }
+
+  async function handleAddSubkey() {
+    if (!selectedKeySummary || !subkeyExpireInput.trim()) {
+      return;
+    }
+    const preset = subkeyPresetOptions.find((option) => option.value === subkeyPreset);
+    if (!preset) {
+      return;
+    }
+    await withBusy(`Adding ${preset.label.toLowerCase()} subkey...`, async () => {
+      const result = await addSubkey(
+        selectedKeySummary.fingerprint,
+        preset.algorithm,
+        preset.usage,
+        subkeyExpireInput.trim(),
+      );
+      setLatestKeyAction(result);
+      await refreshKeys();
+      await refreshStatus();
+      recordActivity("key", "Added subkey", result.summary);
+    });
+  }
+
+  async function handleChangeKeyPassphrase() {
+    if (!selectedKeySummary?.has_secret) {
+      return;
+    }
+    const nextPassphrase = newKeyPassphraseInput;
+    if (!nextPassphrase) {
+      setError("Enter a new key passphrase.");
+      return;
+    }
+    if (nextPassphrase !== confirmKeyPassphraseInput) {
+      setError("New key passphrase confirmation does not match.");
+      return;
+    }
+
+    await withBusy("Changing key passphrase...", async () => {
+      const result = await changeKeyPassphrase(selectedKeySummary.fingerprint, nextPassphrase);
+      setLatestKeyAction(result);
+      setNewKeyPassphraseInput("");
+      setConfirmKeyPassphraseInput("");
+      await refreshStatus();
+      recordActivity("key", "Changed key passphrase", result.summary);
+    });
+  }
+
+  async function handleExportRevocationCertificate() {
+    if (!selectedKeySummary || !revocationPassphrase) {
+      return;
+    }
+    const outputPath =
+      backendMode === "tauri"
+        ? await saveDialog({
+            title: "Export Revocation Certificate",
+            defaultPath: `${keyFileStem(selectedKeySummary)}-revocation.asc`,
+            filters: [{ name: "ASCII-armored certificates", extensions: ["asc"] }],
+          })
+        : `${keyFileStem(selectedKeySummary)}-revocation.asc`;
+    if (!outputPath || Array.isArray(outputPath)) {
+      return;
+    }
+
+    await withBusy("Exporting revocation certificate...", async () => {
+      const result = await exportRevocationCertificate(
+        selectedKeySummary.fingerprint,
+        revocationPassphrase,
+        outputPath,
+      );
+      setLatestKeyAction(result);
+      recordActivity(
+        "key",
+        "Exported revocation certificate",
+        `${keyDisplayName(selectedKeySummary)} to ${filePathLabel(outputPath)}`,
+      );
+    });
+  }
+
+  async function handleExportOwnertrust() {
+    const outputPath =
+      backendMode === "tauri"
+        ? await saveDialog({
+            title: "Export Ownertrust",
+            defaultPath: "ownertrust.txt",
+            filters: [{ name: "Ownertrust snapshot", extensions: ["txt"] }],
+          })
+        : "ownertrust.txt";
+    if (!outputPath || Array.isArray(outputPath)) {
+      return;
+    }
+
+    await withBusy("Exporting ownertrust...", async () => {
+      const result = await exportOwnertrust(outputPath);
+      setLatestKeyAction(result);
+      recordActivity("key", "Exported ownertrust", result.summary);
+    });
+  }
+
+  async function handleRestartSmartcardService() {
+    await withBusy("Restarting smartcard service...", async () => {
+      const result = await restartSmartcardService();
+      setLatestKeyAction(result);
+      const next = await refreshSmartcardStatus();
+      recordActivity("key", "Restarted smartcard service", next?.summary ?? result.summary);
+    });
+  }
+
+  async function handleChangeSmartcardPin() {
+    await withBusy("Opening smartcard PIN workflow...", async () => {
+      const result = await changeSmartcardPin();
+      setLatestKeyAction(result);
+      const next = await refreshSmartcardStatus();
+      recordActivity("key", "Smartcard PIN workflow", next?.summary ?? result.summary);
+    });
+  }
+
+  async function handleFetchSmartcardPublicKey() {
+    await withBusy("Fetching linked public key from hardware token...", async () => {
+      const result = await fetchSmartcardPublicKey();
+      setLatestKeyAction(result);
+      await refreshKeys();
+      const next = await refreshSmartcardStatus();
+      recordActivity("key", "Fetched linked public key from hardware token", next?.summary ?? result.summary);
+    });
+  }
+
+  async function handleCreateSmartcardKeyStubs() {
+    await withBusy("Creating local shadow keys from hardware token...", async () => {
+      const result = await createSmartcardKeyStubs();
+      setLatestKeyAction(result);
+      await refreshKeys();
+      const next = await refreshSmartcardStatus();
+      recordActivity("key", "Created local shadow keys from hardware token", next?.summary ?? result.summary);
+    });
+  }
+
+  async function handleGenerateSmartcardKey() {
+    await withBusy("Generating key material on hardware token...", async () => {
+      const result = await generateSmartcardKey(
+        smartcardGenerateSlot,
+        smartcardGenerateAlgorithm,
+        smartcardGenerateForce,
+      );
+      setLatestKeyAction(result);
+      setIsSmartcardGenerateDialogOpen(false);
+      setSmartcardGenerateForce(false);
+      await refreshSmartcardStatus();
+      await refreshKeys();
+      recordActivity("key", "Generated on-card key material", result.summary);
+    });
+  }
+
+  async function handleFactoryResetSmartcard() {
+    const approved =
+      backendMode === "tauri"
+        ? await confirm(
+            "Factory reset will erase keys and data on the selected hardware token and restore default PINs. Continue?",
+            {
+              title: "Factory Reset Hardware Token",
+              kind: "warning",
+              okLabel: "Reset Token",
+              cancelLabel: "Cancel",
+            },
+          )
+        : window.confirm(
+            "Factory reset will erase keys and data on the selected hardware token and restore default PINs. Continue?",
+          );
+    if (!approved) {
+      return;
+    }
+
+    await withBusy("Running hardware token factory reset...", async () => {
+      const result = await factoryResetSmartcard();
+      setLatestKeyAction(result);
+      await refreshSmartcardStatus();
+      await refreshKeys();
+      recordActivity("key", "Factory reset hardware token", result.summary);
+    });
+  }
+
+  function openSmartcardStoreDialog() {
+    const firstOption = smartcardMovableKeyOptions[0];
+    if (!firstOption) {
+      return;
+    }
+    setSmartcardStoreFingerprint(firstOption.fingerprint);
+    setSmartcardStoreSlot(firstOption.slot);
+    setSmartcardStoreForce(false);
+    setIsSmartcardStoreDialogOpen(true);
+  }
+
+  async function handleStoreSecretKeyToSmartcard() {
+    await withBusy("Storing local secret key on hardware token...", async () => {
+      const result = await moveSecretKeyToSmartcard(
+        smartcardStoreFingerprint,
+        smartcardStoreSlot,
+        smartcardStoreForce,
+      );
+      setLatestKeyAction(result);
+      setIsSmartcardStoreDialogOpen(false);
+      setSmartcardStoreForce(false);
+      await refreshSmartcardStatus();
+      await refreshKeys();
+      if (selectedKeySummary) {
+        setSelectedKeyDetails(await getKeyDetails(selectedKeySummary.fingerprint));
+      }
+      recordActivity("key", "Stored secret key on hardware token", result.summary);
+    });
+  }
+
+  async function handleImportOwnertrust() {
+    const inputPath =
+      backendMode === "tauri"
+        ? await open({
+            directory: false,
+            multiple: false,
+            title: "Import Ownertrust",
+            filters: [{ name: "Ownertrust snapshot", extensions: ["txt"] }],
+          })
+        : window.prompt("Mock mode ownertrust file", "ownertrust.txt");
+    if (!inputPath || Array.isArray(inputPath)) {
+      return;
+    }
+
+    await withBusy("Importing ownertrust...", async () => {
+      const result = await importOwnertrust(inputPath);
+      setLatestKeyAction(result);
+      await refreshKeys();
+      await refreshStatus();
+      recordActivity("key", "Imported ownertrust", result.summary);
+    });
+  }
+
+  async function handleImportX509Certificate() {
+    const path =
+      backendMode === "tauri"
+        ? await open({
+            directory: false,
+            multiple: false,
+            title: "Import X.509 Certificate",
+            filters: [{ name: "Certificates", extensions: ["cer", "crt", "pem", "p7b", "p12", "pfx"] }],
+          })
+        : window.prompt("Mock mode X.509 certificate", "demo-cert.pem");
+    if (!path || Array.isArray(path)) {
+      return;
+    }
+
+    await withBusy("Importing X.509 certificate...", async () => {
+      const result = await importX509Certificate(path);
+      setLatestKeyAction(result);
+      await refreshX509Certificates();
+      recordActivity("key", "Imported X.509 certificate", result.summary);
+    });
+  }
+
+  async function handleImportX509CertificateText() {
+    await withBusy("Importing pasted X.509 certificate...", async () => {
+      const result = await importX509CertificateText(pastedX509CertificateText);
+      setLatestKeyAction(result);
+      await refreshX509Certificates();
+      setIsPasteX509DialogOpen(false);
+      setPastedX509CertificateText("");
+      recordActivity("key", "Imported X.509 certificate from text", result.summary);
+    });
+  }
+
+  async function handleLearnX509Card() {
+    await withBusy("Learning X.509 certificates from smartcard...", async () => {
+      const result = await learnX509Card();
+      setLatestKeyAction(result);
+      await refreshX509Certificates();
+      const next = await refreshSmartcardStatus();
+      recordActivity("key", "Learned X.509 certificates from smartcard", next?.summary ?? result.summary);
+    });
+  }
+
+  async function handleCreateX509Certificate() {
+    setIsCreatingX509Certificate(true);
+    try {
+      await withBusy("Creating X.509 certificate...", async () => {
+        const result = await createX509Certificate(
+          newX509CommonName,
+          newX509Organization,
+          newX509Email,
+          newX509Expiry,
+          newX509Passphrase,
+        );
+        setLatestKeyAction(result);
+        await refreshX509Certificates();
+        setSelectedX509Fingerprint(result.fingerprint === "x509" ? null : result.fingerprint);
+        setIsCreateX509DialogOpen(false);
+        setNewX509CommonName("");
+        setNewX509Organization("");
+        setNewX509Email("");
+        setNewX509Expiry(defaultX509ExpiryDate());
+        setNewX509Passphrase("");
+        recordActivity("key", "Created X.509 certificate", result.summary);
+      });
+    } finally {
+      setIsCreatingX509Certificate(false);
+    }
+  }
+
+  async function handleExportX509Certificate(certificate: X509CertificateSummary) {
+    const outputPath =
+      backendMode === "tauri"
+        ? await saveDialog({
+            title: "Export X.509 Certificate",
+            defaultPath: `${certificate.subject.replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase() || "certificate"}.pem`,
+            filters: [{ name: "PEM certificate", extensions: ["pem", "cer", "crt"] }],
+          })
+        : "certificate.pem";
+    if (!outputPath || Array.isArray(outputPath)) {
+      return;
+    }
+
+    await withBusy("Exporting X.509 certificate...", async () => {
+      const result = await exportX509Certificate(certificate.fingerprint, outputPath);
+      setLatestKeyAction(result);
+      recordActivity("key", "Exported X.509 certificate", result.summary);
+    });
+  }
+
+  async function handleExportX509SecretKey(certificate: X509CertificateSummary) {
+    const outputPath =
+      backendMode === "tauri"
+        ? await saveDialog({
+            title: "Export PKCS#12 Bundle",
+            defaultPath: `${certificate.subject.replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase() || "certificate"}.p12`,
+            filters: [{ name: "PKCS#12 bundle", extensions: ["p12", "pfx"] }],
+          })
+        : "certificate.p12";
+    if (!outputPath || Array.isArray(outputPath)) {
+      return;
+    }
+
+    await withBusy("Exporting PKCS#12 bundle...", async () => {
+      const result = await exportX509SecretKeyP12(certificate.fingerprint, outputPath);
+      setLatestKeyAction(result);
+      recordActivity("key", "Exported PKCS#12 bundle", result.summary);
+    });
+  }
+
+  async function handleExportX509SecretKeyP8(certificate: X509CertificateSummary) {
+    const outputPath =
+      backendMode === "tauri"
+        ? await saveDialog({
+            title: "Export PKCS#8 Key",
+            defaultPath: `${certificate.subject.replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase() || "certificate"}-key.pem`,
+            filters: [{ name: "PKCS#8 key", extensions: ["pem", "key", "p8"] }],
+          })
+        : "certificate-key.pem";
+    if (!outputPath || Array.isArray(outputPath)) {
+      return;
+    }
+
+    await withBusy("Exporting PKCS#8 key...", async () => {
+      const result = await exportX509SecretKeyP8(certificate.fingerprint, outputPath);
+      setLatestKeyAction(result);
+      recordActivity("key", "Exported PKCS#8 key", result.summary);
+    });
+  }
+
+  async function handleChangeX509Passphrase(certificate: X509CertificateSummary) {
+    await withBusy("Opening X.509 passphrase workflow...", async () => {
+      const result = await changeX509Passphrase(certificate.fingerprint);
+      setLatestKeyAction(result);
+      recordActivity("key", "X.509 passphrase workflow", result.summary);
+    });
+  }
+
+  async function handleDeleteX509Certificate(certificate: X509CertificateSummary) {
+    const approved =
+      backendMode === "tauri"
+        ? await confirm(`Remove ${certificate.subject} from the X.509 certificate store?`, {
+            title: "Remove X.509 certificate",
+            kind: "warning",
+            okLabel: "Remove",
+            cancelLabel: "Cancel",
+          })
+        : window.confirm(`Remove ${certificate.subject} from the X.509 certificate store?`);
+    if (!approved) {
+      return;
+    }
+
+    await withBusy("Removing X.509 certificate...", async () => {
+      const result = await deleteX509Certificate(certificate.fingerprint);
+      setLatestKeyAction(result);
+      await refreshX509Certificates();
+      setSelectedX509Recipients((current) =>
+        current.filter((fingerprint) => fingerprint !== certificate.fingerprint),
+      );
+      if (selectedX509SignerFingerprint === certificate.fingerprint) {
+        setSelectedX509SignerFingerprint(null);
+      }
+      recordActivity("key", "Removed X.509 certificate", result.summary);
+    });
+  }
+
+  function handleX509SignerSelection(fingerprint: string) {
+    setSelectedX509SignerFingerprint(fingerprint);
+    recordActivity("key", "Selected X.509 signing certificate", formatFingerprint(fingerprint));
+  }
+
+  function handleX509RecipientSelection(fingerprint: string, checked: boolean) {
+    setSelectedX509Recipients((current) =>
+      checked ? [...new Set([...current, fingerprint])] : current.filter((value) => value !== fingerprint),
+    );
+  }
+
+  async function handleRefreshX509Validation(certificate: X509CertificateSummary) {
+    await withBusy("Refreshing X.509 validation...", async () => {
+      const chain = await getX509CertificateChain(certificate.fingerprint);
+      setSelectedX509Chain(chain);
+      recordActivity("key", "Refreshed X.509 validation", certificate.subject);
+    });
+  }
+
+  async function handleImportX509Crl() {
+    const path =
+      backendMode === "tauri"
+        ? await open({
+            directory: false,
+            multiple: false,
+            title: "Import Certificate Revocation List",
+            filters: [{ name: "Certificate revocation lists", extensions: ["crl", "pem", "der"] }],
+          })
+        : window.prompt("Mock mode CRL file", "demo.crl");
+    if (!path || Array.isArray(path)) {
+      return;
+    }
+
+    await withBusy("Loading certificate revocation data...", async () => {
+      const result = await importX509Crl(path);
+      setLatestKeyAction(result);
+      if (selectedX509Certificate) {
+        const chain = await getX509CertificateChain(selectedX509Certificate.fingerprint);
+        setSelectedX509Chain(chain);
+      }
+      recordActivity("key", "Loaded certificate revocation data", result.summary);
+    });
+  }
+
+  async function handleSetX509TrustRoot(certificate: X509CertificateSummary, trusted: boolean) {
+    await withBusy(trusted ? "Marking certificate as trusted root..." : "Removing trusted root mark...", async () => {
+      const result = await setX509TrustRoot(certificate.fingerprint, trusted);
+      setLatestKeyAction(result);
+      await refreshX509Certificates();
+      const chain = await getX509CertificateChain(certificate.fingerprint);
+      setSelectedX509Chain(chain);
+      recordActivity(
+        "key",
+        trusted ? "Marked trusted root certificate" : "Removed trusted root certificate",
+        certificate.subject,
+      );
+    });
+  }
+
+  async function handleExportX509Trustlist() {
+    const outputPath =
+      backendMode === "tauri"
+        ? await saveDialog({
+            title: "Export Trusted Root Certificates",
+            defaultPath: "trustlist.txt",
+            filters: [{ name: "Trust list", extensions: ["txt"] }],
+          })
+        : "trustlist.txt";
+    if (!outputPath || Array.isArray(outputPath)) {
+      return;
+    }
+
+    await withBusy("Exporting trusted root certificates...", async () => {
+      const result = await exportX509Trustlist(outputPath);
+      setLatestKeyAction(result);
+      recordActivity("key", "Exported trusted root certificates", result.summary);
+    });
+  }
+
+  async function handleImportX509Trustlist() {
+    const inputPath =
+      backendMode === "tauri"
+        ? await open({
+            directory: false,
+            multiple: false,
+            title: "Import Trusted Root Certificates",
+            filters: [{ name: "Trust list", extensions: ["txt"] }],
+          })
+        : window.prompt("Mock mode trust list", "trustlist.txt");
+    if (!inputPath || Array.isArray(inputPath)) {
+      return;
+    }
+
+    await withBusy("Importing trusted root certificates...", async () => {
+      const result = await importX509Trustlist(inputPath);
+      setLatestKeyAction(result);
+      await refreshX509Certificates();
+      if (selectedX509Certificate) {
+        const chain = await getX509CertificateChain(selectedX509Certificate.fingerprint);
+        setSelectedX509Chain(chain);
+      }
+      recordActivity("key", "Imported trusted root certificates", result.summary);
+    });
   }
 
   async function handleCreate() {
@@ -1482,6 +2676,7 @@ export function App() {
       const created = await createNote(normalized, "", useSignatureForOutput);
       await refreshNotes();
       await handleSelectNote(created);
+      recordActivity("note", "Created note", normalized);
     });
   }
 
@@ -1498,6 +2693,7 @@ export function App() {
       setDirty(false);
       await refreshNotes();
       await refreshNoteEncryption(selectedNote.id);
+      recordActivity("note", "Saved password-protected note", selectedNote.relative_path);
     });
   }
 
@@ -1522,6 +2718,7 @@ export function App() {
           signature: clipboardSignature,
         }));
       }
+      recordActivity("note", "Created note from clipboard", normalized);
     });
   }
 
@@ -1579,7 +2776,10 @@ export function App() {
       }
 
       await withBusy("Importing key from clipboard...", async () => {
-        await importKeyText(trimmed);
+        const result = await importKeyText(trimmed);
+        setLatestImportResult(result);
+        focusImportedKey(result);
+        recordActivity("key", "Imported key from clipboard", result.summary);
         await refreshKeys();
         await refreshStatus();
       });
@@ -1646,6 +2846,7 @@ export function App() {
       const renamed = await renameNote(selectedNote.id, normalized);
       await refreshNotes();
       setSelectedNote(renamed);
+      recordActivity("note", "Renamed note", `${selectedNote.relative_path} -> ${normalized}`);
     });
   }
 
@@ -1671,6 +2872,7 @@ export function App() {
       setSelectedNote(null);
       setEditorValue("");
       setDirty(false);
+      recordActivity("note", "Deleted note", selectedNote.relative_path);
     });
   }
 
@@ -1683,6 +2885,7 @@ export function App() {
       await selectPrivateKey(fingerprint);
       await refreshKeys();
       await refreshStatus();
+      recordActivity("key", "Selected private key", formatFingerprint(fingerprint));
     });
   }
 
@@ -1781,6 +2984,7 @@ export function App() {
       if (selectedNote) {
         await refreshNoteEncryption(selectedNote.id);
       }
+      recordActivity("key", "Removed key", keyDisplayName(key));
     });
   }
 
@@ -1844,6 +3048,34 @@ export function App() {
     setSelectedFilePaths((current) => [...new Set([...current, ...paths])]);
   }
 
+  async function pickFolders() {
+    if (backendMode !== "tauri") {
+      const mocked = window.prompt("Mock mode folder paths (comma separated)", "project-docs,photos");
+      if (!mocked) {
+        return;
+      }
+      const parsed = mocked
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+      if (parsed.length > 0) {
+        setSelectedFilePaths((current) => [...new Set([...current, ...parsed])]);
+      }
+      return;
+    }
+
+    const selected = await open({
+      directory: true,
+      multiple: true,
+      title: "Choose Folder",
+    });
+    if (!selected) {
+      return;
+    }
+    const paths = Array.isArray(selected) ? selected : [selected];
+    setSelectedFilePaths((current) => [...new Set([...current, ...paths])]);
+  }
+
   async function pickOutputDirectory() {
     const selected =
       backendMode === "tauri"
@@ -1878,6 +3110,9 @@ export function App() {
   }
 
   function clearSelectedFiles() {
+    if (selectedFilePaths.length > 0 || fileOperationResults.length > 0) {
+      recordActivity("file", "Cleared file workspace", "Removed queued files and recent outputs.");
+    }
     setSelectedFilePaths([]);
     setFileOperationResults([]);
     setFileVerificationStatus(null);
@@ -1908,6 +3143,7 @@ export function App() {
 
   async function runFileOperation(
     label: string,
+    activityTitle: string,
     work: () => Promise<FileOperationResult[]>,
   ) {
     await withBusy(label, async () => {
@@ -1915,6 +3151,11 @@ export function App() {
       setFileOperationResults(results);
       if (results.length > 0) {
         setFileOutputDir(results[0].output_path.replace(/[\\/][^\\/]+$/, ""));
+        recordActivity(
+          "file",
+          activityTitle,
+          `${results.length} file${results.length === 1 ? "" : "s"} -> ${filePathLabel(results[0].output_path)}${results.length > 1 ? " and more" : ""}`,
+        );
       }
     });
   }
@@ -1924,7 +3165,19 @@ export function App() {
       setError("Choose files and an output folder first.");
       return;
     }
-    await runFileOperation("Encrypting files...", () => encryptFiles(selectedFilePaths, fileOutputDir));
+    if (fileCryptoMode === "smime") {
+      if (selectedX509Recipients.length === 0) {
+        setError("Choose one or more X.509 recipient certificates first.");
+        return;
+      }
+      await runFileOperation("Encrypting CMS files...", "Encrypted CMS files", () =>
+        encryptCmsFiles(selectedFilePaths, fileOutputDir, selectedX509Recipients),
+      );
+      return;
+    }
+    await runFileOperation("Encrypting files...", "Encrypted files", () =>
+      encryptFiles(selectedFilePaths, fileOutputDir),
+    );
   }
 
   async function handleDecryptFiles() {
@@ -1932,7 +3185,15 @@ export function App() {
       setError("Choose files and an output folder first.");
       return;
     }
-    await runFileOperation("Decrypting files...", () => decryptFiles(selectedFilePaths, fileOutputDir));
+    if (fileCryptoMode === "smime") {
+      await runFileOperation("Decrypting CMS files...", "Decrypted CMS files", () =>
+        decryptCmsFiles(selectedFilePaths, fileOutputDir),
+      );
+      return;
+    }
+    await runFileOperation("Decrypting files...", "Decrypted files", () =>
+      decryptFiles(selectedFilePaths, fileOutputDir),
+    );
   }
 
   async function handleSignFiles() {
@@ -1940,7 +3201,19 @@ export function App() {
       setError("Choose files and an output folder first.");
       return;
     }
-    await runFileOperation("Signing files...", () => signFiles(selectedFilePaths, fileOutputDir));
+    if (fileCryptoMode === "smime") {
+      if (!selectedX509SignerFingerprint) {
+        setError("Choose an X.509 signing certificate first.");
+        return;
+      }
+      await runFileOperation("Signing CMS files...", "Signed CMS files", () =>
+        signCmsFiles(selectedFilePaths, fileOutputDir, selectedX509SignerFingerprint),
+      );
+      return;
+    }
+    await runFileOperation("Signing files...", "Signed files", () =>
+      signFiles(selectedFilePaths, fileOutputDir),
+    );
   }
 
   async function handleVerifyFileSignature() {
@@ -1949,8 +3222,12 @@ export function App() {
       return;
     }
     await withBusy("Verifying signature...", async () => {
-      const next = await verifyFileSignature(verifyInputPath, verifySignaturePath);
+      const next =
+        fileCryptoMode === "smime"
+          ? await verifyCmsFileSignature(verifyInputPath, verifySignaturePath)
+          : await verifyFileSignature(verifyInputPath, verifySignaturePath);
       setFileVerificationStatus(next);
+      recordActivity("file", "Verified detached signature", next.summary);
     });
   }
 
@@ -2045,6 +3322,246 @@ export function App() {
             </DialogContent>
           </Dialog>
 
+          <Dialog open={isCreateX509DialogOpen} onOpenChange={setIsCreateX509DialogOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Create X.509 Certificate</DialogTitle>
+                <DialogDescription>
+                  Create a self-signed certificate for CMS and S/MIME workflows.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="grid gap-3">
+                <Input
+                  value={newX509CommonName}
+                  onChange={(event) => setNewX509CommonName(event.target.value)}
+                  placeholder="Common name"
+                />
+                <Input
+                  value={newX509Organization}
+                  onChange={(event) => setNewX509Organization(event.target.value)}
+                  placeholder="Organization (optional)"
+                />
+                <Input
+                  value={newX509Email}
+                  onChange={(event) => setNewX509Email(event.target.value)}
+                  placeholder="Email (optional)"
+                  type="email"
+                />
+                <Input
+                  value={newX509Expiry}
+                  onChange={(event) => setNewX509Expiry(event.target.value)}
+                  placeholder="YYYY-MM-DD"
+                />
+                <Input
+                  value={newX509Passphrase}
+                  onChange={(event) => setNewX509Passphrase(event.target.value)}
+                  placeholder="Certificate passphrase"
+                  type="password"
+                />
+              </div>
+              <DialogFooter className="gap-2">
+                <Button variant="ghost" onClick={() => setIsCreateX509DialogOpen(false)}>
+                  Cancel
+                </Button>
+                <Button
+                  onClick={() => void handleCreateX509Certificate()}
+                  disabled={
+                    isCreatingX509Certificate ||
+                    !newX509CommonName.trim() ||
+                    !newX509Expiry.trim() ||
+                    !newX509Passphrase
+                  }
+                >
+                  {isCreatingX509Certificate ? "Creating..." : "Create Certificate"}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          <Dialog open={isPasteX509DialogOpen} onOpenChange={setIsPasteX509DialogOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Paste X.509 Certificate</DialogTitle>
+                <DialogDescription>
+                  Import a certificate directly from pasted PEM or other certificate text.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="grid gap-3">
+                <Textarea
+                  value={pastedX509CertificateText}
+                  onChange={(event) => setPastedX509CertificateText(event.target.value)}
+                  placeholder="Paste certificate text here"
+                  rows={10}
+                />
+              </div>
+              <DialogFooter className="gap-2">
+                <Button variant="ghost" onClick={() => setIsPasteX509DialogOpen(false)}>
+                  Cancel
+                </Button>
+                <Button
+                  onClick={() => void handleImportX509CertificateText()}
+                  disabled={!pastedX509CertificateText.trim()}
+                >
+                  Import Certificate
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          <Dialog open={isSmartcardGenerateDialogOpen} onOpenChange={setIsSmartcardGenerateDialogOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Generate On-Card Key</DialogTitle>
+                <DialogDescription>
+                  Create fresh key material directly on the hardware token for one OpenPGP slot.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="grid gap-3">
+                <label className="grid gap-1 text-sm text-muted-foreground">
+                  <span>Slot</span>
+                  <select
+                    className="rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground"
+                    value={smartcardGenerateSlot}
+                    onChange={(event) =>
+                      setSmartcardGenerateSlot(
+                        event.target.value as (typeof smartcardSlotOptions)[number]["value"],
+                      )
+                    }
+                  >
+                    {smartcardSlotOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="grid gap-1 text-sm text-muted-foreground">
+                  <span>Algorithm</span>
+                  <select
+                    className="rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground"
+                    value={smartcardGenerateAlgorithm}
+                    onChange={(event) =>
+                      setSmartcardGenerateAlgorithm(
+                        event.target.value as (typeof smartcardAlgorithmOptions)[number]["value"],
+                      )
+                    }
+                  >
+                    {smartcardAlgorithmOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="flex items-center justify-between gap-3 rounded-md border border-border/70 bg-background/60 px-3 py-2">
+                  <div className="min-w-0">
+                    <div className="text-sm text-foreground">Replace existing slot</div>
+                    <div className="text-xs text-muted-foreground">
+                      Enable only when you intentionally want to overwrite the current card key in this slot.
+                    </div>
+                  </div>
+                  <Switch
+                    checked={smartcardGenerateForce}
+                    onCheckedChange={setSmartcardGenerateForce}
+                  />
+                </div>
+                <div className="rounded-md border border-border/70 bg-background/60 px-3 py-2 text-xs text-muted-foreground">
+                  {smartcardGenerateForce
+                    ? "Force mode will overwrite key material already stored in the selected token slot."
+                    : "This writes new key material to the selected token slot. Use an empty slot unless you intend to replace existing card keys."}
+                </div>
+              </div>
+              <DialogFooter className="gap-2">
+                <Button variant="ghost" onClick={() => setIsSmartcardGenerateDialogOpen(false)}>
+                  Cancel
+                </Button>
+                <Button onClick={() => void handleGenerateSmartcardKey()}>
+                  Generate Key
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          <Dialog open={isSmartcardStoreDialogOpen} onOpenChange={setIsSmartcardStoreDialogOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Store Secret Key On Token</DialogTitle>
+                <DialogDescription>
+                  Move existing local OpenPGP secret key material into a selected hardware token slot.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="grid gap-3">
+                <label className="grid gap-1 text-sm text-muted-foreground">
+                  <span>Local key material</span>
+                  <select
+                    className="rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground"
+                    value={smartcardStoreFingerprint}
+                    onChange={(event) => {
+                      const fingerprint = event.target.value;
+                      setSmartcardStoreFingerprint(fingerprint);
+                      const option = smartcardMovableKeyOptions.find((item) => item.fingerprint === fingerprint);
+                      if (option) {
+                        setSmartcardStoreSlot(option.slot);
+                      }
+                    }}
+                  >
+                    {smartcardMovableKeyOptions.map((option) => (
+                      <option key={option.fingerprint} value={option.fingerprint}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="grid gap-1 text-sm text-muted-foreground">
+                  <span>Token slot</span>
+                  <select
+                    className="rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground"
+                    value={smartcardStoreSlot}
+                    onChange={(event) =>
+                      setSmartcardStoreSlot(
+                        event.target.value as (typeof smartcardSlotOptions)[number]["value"],
+                      )
+                    }
+                  >
+                    {smartcardSlotOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="flex items-center justify-between gap-3 rounded-md border border-border/70 bg-background/60 px-3 py-2">
+                  <div className="min-w-0">
+                    <div className="text-sm text-foreground">Replace existing slot</div>
+                    <div className="text-xs text-muted-foreground">
+                      Enable only when you intentionally want to overwrite a token slot that already contains key material.
+                    </div>
+                  </div>
+                  <Switch
+                    checked={smartcardStoreForce}
+                    onCheckedChange={setSmartcardStoreForce}
+                  />
+                </div>
+                <div className="rounded-md border border-border/70 bg-background/60 px-3 py-2 text-xs text-muted-foreground">
+                  {smartcardStoreForce
+                    ? "Force mode will overwrite the selected token slot with this local secret key."
+                    : "This stores the selected local secret key on the token. Use an empty slot unless you intend to replace existing token keys."}
+                </div>
+              </div>
+              <DialogFooter className="gap-2">
+                <Button variant="ghost" onClick={() => setIsSmartcardStoreDialogOpen(false)}>
+                  Cancel
+                </Button>
+                <Button
+                  onClick={() => void handleStoreSecretKeyToSmartcard()}
+                  disabled={!smartcardStoreFingerprint}
+                >
+                  Store Key
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
           <Dialog open={isVaultSaveDialogOpen} onOpenChange={setIsVaultSaveDialogOpen}>
             <DialogContent>
               <DialogHeader>
@@ -2115,6 +3632,238 @@ export function App() {
                 </Button>
                 <Button onClick={() => void handleConfirmExport()} disabled={!exportPassphrase}>
                   Continue
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          <Dialog open={isKeyToolsOpen} onOpenChange={setIsKeyToolsOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Keyring Tools</DialogTitle>
+                <DialogDescription>
+                  Update trust and expiry, add a subkey, manage trust snapshots, certify the selected key, or export a revocation certificate.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-4">
+                <div className="grid gap-2">
+                  <label className="text-sm font-medium">Expiration</label>
+                  <div className="flex gap-2">
+                    <Input
+                      value={keyExpiryInput}
+                      onChange={(event) => setKeyExpiryInput(event.target.value)}
+                      placeholder="never, 1y, 2027-12-31"
+                    />
+                    <Button onClick={() => void handleSaveKeyExpiry()} disabled={!selectedKeySummary || !keyExpiryInput.trim()}>
+                      Save
+                    </Button>
+                  </div>
+                </div>
+                <div className="grid gap-2">
+                  <label className="text-sm font-medium">Ownertrust</label>
+                  <div className="flex gap-2">
+                    <select
+                      value={ownertrustInput}
+                      onChange={(event) => setOwnertrustInput(event.target.value)}
+                      className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                    >
+                      {ownertrustOptions.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <Button onClick={() => void handleSaveOwnertrust()} disabled={!selectedKeySummary}>
+                      Save
+                    </Button>
+                  </div>
+                </div>
+                <div className="grid gap-2">
+                  <label className="text-sm font-medium">Trust Snapshot</label>
+                  <div className="flex flex-wrap gap-2">
+                    <Button variant="secondary" onClick={() => void handleImportOwnertrust()}>
+                      Import
+                    </Button>
+                    <Button onClick={() => void handleExportOwnertrust()}>
+                      Export
+                    </Button>
+                  </div>
+                </div>
+                <div className="grid gap-2">
+                  <label className="text-sm font-medium">Add Subkey</label>
+                  <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_140px_auto]">
+                    <select
+                      value={subkeyPreset}
+                      onChange={(event) =>
+                        setSubkeyPreset(event.target.value as (typeof subkeyPresetOptions)[number]["value"])
+                      }
+                      className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                    >
+                      {subkeyPresetOptions.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <Input
+                      value={subkeyExpireInput}
+                      onChange={(event) => setSubkeyExpireInput(event.target.value)}
+                      placeholder="1y or never"
+                    />
+                    <Button onClick={() => void handleAddSubkey()} disabled={!selectedKeySummary || !subkeyExpireInput.trim()}>
+                      Add
+                    </Button>
+                  </div>
+                </div>
+                <div className="grid gap-2">
+                  <label className="text-sm font-medium">Change Passphrase</label>
+                  <div className="grid gap-2">
+                    <Input
+                      value={newKeyPassphraseInput}
+                      onChange={(event) => setNewKeyPassphraseInput(event.target.value)}
+                      placeholder="New key passphrase"
+                      type="password"
+                    />
+                    <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+                      <Input
+                        value={confirmKeyPassphraseInput}
+                        onChange={(event) => setConfirmKeyPassphraseInput(event.target.value)}
+                        placeholder="Confirm new passphrase"
+                        type="password"
+                      />
+                      <div className="hidden sm:block text-xs text-muted-foreground self-center">
+                        Selected private key only
+                      </div>
+                      <Button
+                        onClick={() => void handleChangeKeyPassphrase()}
+                        disabled={
+                          !selectedKeySummary?.has_secret ||
+                          !selectedKeySummary.is_selected_private ||
+                          !status.session_unlocked ||
+                          !newKeyPassphraseInput ||
+                          !confirmKeyPassphraseInput
+                        }
+                      >
+                        Update
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+                <div className="grid gap-2">
+                  <label className="text-sm font-medium">Certification</label>
+                  <div className="flex flex-wrap gap-2">
+                    <Button onClick={() => void handleCertifySelectedKey(false)} disabled={!selectedKeySummary}>
+                      Certify
+                    </Button>
+                    <Button variant="secondary" onClick={() => void handleCertifySelectedKey(true)} disabled={!selectedKeySummary}>
+                      Local Certify
+                    </Button>
+                  </div>
+                </div>
+                <div className="grid gap-2">
+                  <label className="text-sm font-medium">Distribution</label>
+                  <div className="flex flex-wrap gap-2">
+                    <Button variant="secondary" onClick={() => void handleRefreshSelectedKey()} disabled={!selectedKeySummary}>
+                      Refresh
+                    </Button>
+                    <Button onClick={() => void handlePublishSelectedKey()} disabled={!selectedKeySummary}>
+                      Publish
+                    </Button>
+                  </div>
+                </div>
+                <div className="grid gap-2">
+                  <label className="text-sm font-medium">Revocation Certificate</label>
+                  <Input
+                    value={revocationPassphrase}
+                    onChange={(event) => setRevocationPassphrase(event.target.value)}
+                    placeholder="Key passphrase"
+                    type="password"
+                  />
+                  <Button
+                    variant="secondary"
+                    onClick={() => void handleExportRevocationCertificate()}
+                    disabled={!selectedKeySummary || !revocationPassphrase}
+                  >
+                    Export Revocation
+                  </Button>
+                </div>
+              </div>
+              <DialogFooter>
+                <Button variant="ghost" onClick={() => setIsKeyToolsOpen(false)}>
+                  Close
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          <Dialog open={isLookupDialogOpen} onOpenChange={setIsLookupDialogOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Lookup Public Key</DialogTitle>
+                <DialogDescription>
+                  Search using email, key ID, or fingerprint. The app uses GnuPG auto-discovery with WKD and a public keyserver.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-3">
+                <Input
+                  value={lookupQuery}
+                  onChange={(event) => {
+                    setLookupQuery(event.target.value);
+                    setKeyserverResults([]);
+                  }}
+                  placeholder="alice@example.com or fingerprint"
+                />
+                <div className="rounded-lg border border-border/70 bg-background/40 px-3 py-2 text-xs text-muted-foreground">
+                  `Lookup` uses WKD and auto-discovery. `Search` browses the public keyserver and lets you import a specific result.
+                </div>
+                {keyserverResults.length > 0 ? (
+                  <div className="max-h-56 space-y-2 overflow-auto rounded-lg border border-border/70 bg-background/30 p-2">
+                    {keyserverResults.map((result) => (
+                      <div
+                        key={result.fingerprint}
+                        className="rounded-lg border border-border/70 bg-background/60 p-3"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="truncate text-sm font-medium">
+                              {result.user_ids[0] ?? formatFingerprint(result.fingerprint)}
+                            </div>
+                            <div className="truncate text-xs text-muted-foreground">
+                              {result.algorithm} {result.bits ? `• ${result.bits}-bit` : ""}
+                            </div>
+                          </div>
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => void handleImportKeyserverResult(result.fingerprint)}
+                          >
+                            Import
+                          </Button>
+                        </div>
+                        <code className="mt-2 block break-all text-xs text-muted-foreground">
+                          {result.fingerprint}
+                        </code>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+              <DialogFooter className="gap-2">
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    setIsLookupDialogOpen(false);
+                    setLookupQuery("");
+                    setKeyserverResults([]);
+                  }}
+                >
+                  Cancel
+                </Button>
+                <Button variant="secondary" onClick={() => void handleSearchKeyserver()} disabled={!lookupQuery.trim() || isSearchingKeyserver}>
+                  {isSearchingKeyserver ? "Searching..." : "Search"}
+                </Button>
+                <Button onClick={() => void handleLookupKey()} disabled={!lookupQuery.trim()}>
+                  Lookup
                 </Button>
               </DialogFooter>
             </DialogContent>
@@ -2283,10 +4032,22 @@ export function App() {
                       )}
                     </DropdownMenuContent>
                   </DropdownMenu>
-                  <Button size="sm" onClick={() => void handleOpenFolder()}>
-                    <FolderOpen className="h-4 w-4" />
-                    Open Vault
-                  </Button>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button size="sm">
+                        <FolderOpen className="h-4 w-4" />
+                        Open Vault
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start" side="bottom" className="w-40">
+                      <DropdownMenuItem onClick={() => void handleOpenFolder()}>
+                        Folder
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => void handleOpenArchive()}>
+                        Archive
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                   <Button
                     size="sm"
                     variant="secondary"
@@ -2308,6 +4069,13 @@ export function App() {
                   <span className="font-medium text-foreground">Current Vault Path:</span>{" "}
                   <span className="break-all">{status.vault_path ?? "No vault selected"}</span>
                 </div>
+                <Badge variant="outline">
+                  {status.vault_kind === "archive"
+                    ? "Archive vault"
+                    : status.vault_kind === "folder"
+                    ? "Folder vault"
+                    : "No vault"}
+                </Badge>
                 <Badge variant={status.session_unlocked ? "default" : "secondary"}>
                   {status.session_unlocked ? "Unlocked" : "Locked"}
                 </Badge>
@@ -2387,7 +4155,15 @@ export function App() {
               onClick={() => setActiveTab("vault")}
             >
               <NotebookPen className="h-4 w-4" />
-              Vault
+              Note Vault
+            </Button>
+            <Button
+              variant={activeTab === "files" ? "secondary" : "ghost"}
+              className="flex-1 justify-center"
+              onClick={() => setActiveTab("files")}
+            >
+              <Files className="h-4 w-4" />
+              Files
             </Button>
             <Button
               variant={activeTab === "keyring" ? "secondary" : "ghost"}
@@ -2512,117 +4288,6 @@ export function App() {
               <Card className="border-white/10 bg-card/75">
                 <CardHeader className="space-y-3 pb-3">
                   <div className="flex items-center justify-between gap-2">
-                    <CardTitle className="text-base">Files</CardTitle>
-                    <Files className="h-4 w-4 text-muted-foreground" />
-                  </div>
-                  <CardDescription>
-                    Encrypt, decrypt, sign, and verify files without leaving the vault.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-3 pt-0">
-                  <div
-                    className={cn(
-                      "rounded-lg border border-dashed p-3 text-sm transition-colors",
-                      isFileDropActive
-                        ? "border-primary/50 bg-primary/10"
-                        : "border-border/70 bg-background/40 text-muted-foreground",
-                    )}
-                    onDragOver={(event) => {
-                      event.preventDefault();
-                      setIsFileDropActive(true);
-                    }}
-                    onDragLeave={() => setIsFileDropActive(false)}
-                    onDrop={(event) => void handleFileDrop(event)}
-                  >
-                    Drop files here or choose them below.
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    <Button size="sm" variant="secondary" onClick={() => void pickFiles()}>
-                      Choose Files
-                    </Button>
-                    <Button size="sm" variant="secondary" onClick={() => void pickOutputDirectory()}>
-                      Output Folder
-                    </Button>
-                  </div>
-
-                  <div className="flex flex-wrap gap-2">
-                    <Button size="sm" onClick={() => void handleEncryptFiles()} disabled={selectedFilePaths.length === 0}>
-                      Encrypt
-                    </Button>
-                    <Button size="sm" variant="secondary" onClick={() => void handleDecryptFiles()} disabled={selectedFilePaths.length === 0}>
-                      Decrypt
-                    </Button>
-                    <Button size="sm" variant="secondary" onClick={() => void handleSignFiles()} disabled={selectedFilePaths.length === 0}>
-                      Sign
-                    </Button>
-                    <Button size="sm" variant="ghost" onClick={clearSelectedFiles} disabled={selectedFilePaths.length === 0}>
-                      Clear
-                    </Button>
-                  </div>
-
-                  <div className="rounded-lg border border-border/70 bg-background/40 px-3 py-2 text-xs text-muted-foreground">
-                    Output: <span className="break-all text-foreground">{fileOutputDir || "No folder selected"}</span>
-                  </div>
-
-                  <ScrollArea className="h-28 pr-3">
-                    <div className="space-y-2">
-                      {selectedFilePaths.length === 0 ? (
-                        <div className="rounded-lg border border-dashed border-border p-3 text-sm text-muted-foreground">
-                          No files queued.
-                        </div>
-                      ) : (
-                        selectedFilePaths.map((path) => (
-                          <div key={path} className="rounded-lg border border-border/70 bg-background/40 px-3 py-2 text-sm">
-                            <div className="truncate font-medium">{filePathLabel(path)}</div>
-                            <div className="truncate text-xs text-muted-foreground">{path}</div>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  </ScrollArea>
-
-                  <div className="space-y-2 rounded-lg border border-border/70 bg-background/40 p-3">
-                    <div className="text-sm font-medium">Verify Detached Signature</div>
-                    <Button size="sm" variant="secondary" onClick={() => void pickVerifyInputFile()}>
-                      Choose File
-                    </Button>
-                    <div className="truncate text-xs text-muted-foreground">{verifyInputPath || "No file selected"}</div>
-                    <Button size="sm" variant="secondary" onClick={() => void pickVerifySignatureFile()}>
-                      Choose Signature
-                    </Button>
-                    <div className="truncate text-xs text-muted-foreground">{verifySignaturePath || "No signature selected"}</div>
-                    <Button size="sm" onClick={() => void handleVerifyFileSignature()} disabled={!verifyInputPath || !verifySignaturePath}>
-                      Verify
-                    </Button>
-                    {fileVerificationStatus ? (
-                      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                        <Badge variant={signatureBadgeVariant(fileVerificationStatus.state)}>
-                          {fileVerificationStatus.state}
-                        </Badge>
-                        <span>{fileVerificationStatus.summary}</span>
-                      </div>
-                    ) : null}
-                  </div>
-
-                  {fileOperationResults.length > 0 ? (
-                    <div className="space-y-2 rounded-lg border border-border/70 bg-background/40 p-3">
-                      <div className="text-sm font-medium">Recent File Outputs</div>
-                      {fileOperationResults.map((result) => (
-                        <div key={`${result.input_path}-${result.output_path}`} className="rounded-lg border border-border/70 bg-background/60 px-3 py-2 text-xs text-muted-foreground">
-                          <div className="font-medium text-foreground">{result.operation}</div>
-                          <div className="truncate">{result.input_path}</div>
-                          <div className="truncate">{result.output_path}</div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
-                </CardContent>
-              </Card>
-
-              <Card className="border-white/10 bg-card/75">
-                <CardHeader className="space-y-3 pb-3">
-                  <div className="flex items-center justify-between gap-2">
                     <CardTitle className="text-base">Keys</CardTitle>
                     <div className="flex items-center gap-2">
                       <Button variant="ghost" size="icon" onClick={() => void refreshKeys()}>
@@ -2671,16 +4336,16 @@ export function App() {
                   <ScrollArea className="h-[340px] pr-3">
                     <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleKeyDragEnd}>
                     <SortableContext
-                      items={orderedKeys.map((key) => key.fingerprint)}
+                      items={filteredOrderedKeys.map((key) => key.fingerprint)}
                       strategy={verticalListSortingStrategy}
                     >
                     <div className="space-y-2">
-                    {orderedKeys.length === 0 ? (
+                    {filteredOrderedKeys.length === 0 ? (
                         <div className="rounded-lg border border-dashed border-border p-3 text-sm text-muted-foreground">
-                          No keys imported yet.
+                          {keySearch.trim() ? "No keys match this filter." : "No keys imported yet."}
                         </div>
                       ) : (
-                        orderedKeys.map((key) => (
+                        filteredOrderedKeys.map((key) => (
                           <SortableKeyCard
                             key={key.fingerprint}
                             keyItem={key}
@@ -2859,6 +4524,328 @@ export function App() {
               </CardContent>
             </Card>
           </div>
+          ) : activeTab === "files" ? (
+            <div className="grid gap-4 md:grid-cols-[280px_minmax(0,1fr)]">
+              <aside className="space-y-4">
+                <Card className="border-white/10 bg-card/75 md:flex md:min-h-[calc(100vh-12rem)] md:flex-col">
+                  <CardHeader className="space-y-3 pb-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <CardTitle className="text-base">Keys</CardTitle>
+                      <div className="flex items-center gap-2">
+                        <Button variant="ghost" size="icon" onClick={() => void refreshKeys()}>
+                          <RefreshCcw className="h-4 w-4" />
+                        </Button>
+                        <label className="flex items-center gap-2 rounded-md border border-border/70 px-2 py-1 text-xs text-muted-foreground">
+                          <input
+                            type="checkbox"
+                            checked={useSignature}
+                            onChange={(event) => void handleUseSignatureToggle(event.target.checked)}
+                          />
+                          <span className="flex flex-col leading-tight">
+                            <span>Sign Only</span>
+                            <span>(Not Encrypted)</span>
+                          </span>
+                        </label>
+                      </div>
+                    </div>
+                    <div className="relative">
+                      <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                      <Input
+                        className="h-9 pl-9"
+                        type="search"
+                        value={keySearch}
+                        placeholder="Filter keys"
+                        onChange={(event) => setKeySearch(event.target.value)}
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Button
+                        className="w-full"
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => setIsCreateKeyOpen(true)}
+                      >
+                        <Plus className="h-4 w-4" />
+                        Create
+                      </Button>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button className="w-full" size="sm" variant="secondary">
+                            <FileKey className="h-4 w-4" />
+                            Import
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" side="bottom" className="w-40">
+                          <DropdownMenuItem onClick={() => void handleImportKey()}>File</DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => void handleImportClipboard()}>
+                            Clipboard
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => setIsLookupDialogOpen(true)}>
+                            Lookup
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
+                  </CardHeader>
+                  <CardContent className="space-y-4 pt-0 md:flex md:min-h-0 md:flex-1 md:flex-col">
+                    <ScrollArea className="h-[340px] pr-3 md:min-h-0 md:flex-1">
+                      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleKeyDragEnd}>
+                      <SortableContext
+                        items={filteredOrderedKeys.map((key) => key.fingerprint)}
+                        strategy={verticalListSortingStrategy}
+                      >
+                      <div className="space-y-2">
+                      {filteredOrderedKeys.length === 0 ? (
+                          <div className="rounded-lg border border-dashed border-border p-3 text-sm text-muted-foreground">
+                            {keySearch.trim() ? "No keys match this filter." : "No keys imported yet."}
+                          </div>
+                        ) : (
+                          filteredOrderedKeys.map((key) => (
+                            <SortableKeyCard
+                              key={key.fingerprint}
+                              keyItem={key}
+                              isPrivatePinned={pinnedPrivateKey === key.fingerprint}
+                              isRecipientPinned={pinnedRecipients.includes(key.fingerprint)}
+                              onPrivateKeySelection={(fingerprint) => void handlePrivateKeySelection(fingerprint)}
+                              onRecipientSelection={(fingerprint, checked) =>
+                                void handleRecipientSelection(fingerprint, checked)
+                              }
+                              onTogglePrivatePin={(currentKey) => void handleTogglePrivatePin(currentKey)}
+                              onToggleRecipientPin={(currentKey) => void handleToggleRecipientPin(currentKey)}
+                              onExportPublic={(currentKey) => void handleExportPublic(currentKey)}
+                              onOpenExportDialog={(currentKey, mode) => openExportDialog(currentKey, mode)}
+                              onRemoveKey={(currentKey) => void handleRemoveKey(currentKey)}
+                            />
+                          ))
+                        )}
+                      </div>
+                      </SortableContext>
+                      </DndContext>
+                    </ScrollArea>
+                  </CardContent>
+                </Card>
+              </aside>
+
+              <Card className="border-white/10 bg-card/75 md:flex md:min-h-[calc(100vh-12rem)] md:flex-col">
+                <CardHeader className="space-y-3 pb-3">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <CardTitle className="truncate text-base">
+                        {selectedFilePaths.length > 0
+                          ? `${selectedFilePaths.length} queued item${selectedFilePaths.length === 1 ? "" : "s"}`
+                          : "File Workspace"}
+                      </CardTitle>
+                      <CardDescription>
+                        Batch operations, detached signature verification, and recent file outputs.
+                      </CardDescription>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <div className="flex rounded-md border border-border/70 bg-background/40 p-1">
+                        <Button
+                          size="sm"
+                          variant={fileCryptoMode === "openpgp" ? "default" : "ghost"}
+                          onClick={() => setFileCryptoMode("openpgp")}
+                        >
+                          OpenPGP
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant={fileCryptoMode === "smime" ? "default" : "ghost"}
+                          onClick={() => setFileCryptoMode("smime")}
+                        >
+                          S/MIME
+                        </Button>
+                      </div>
+                      <Button size="sm" onClick={() => void pickFiles()}>
+                        <Upload className="h-4 w-4" />
+                        Choose Files
+                      </Button>
+                      <Button size="sm" variant="secondary" onClick={() => void pickFolders()}>
+                        <FolderOpen className="h-4 w-4" />
+                        Choose Folder
+                      </Button>
+                      <Button size="sm" variant="secondary" onClick={() => void pickOutputDirectory()}>
+                        Choose Output Folder
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => void handleVerifyFileSignature()}
+                        disabled={!verifyInputPath || !verifySignaturePath}
+                      >
+                        Verify Signature
+                      </Button>
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent className="space-y-4 pt-0 md:flex md:flex-1 md:flex-col">
+                  <div
+                    className={cn(
+                      "rounded-lg border border-dashed p-3 text-sm transition-colors",
+                      isFileDropActive
+                        ? "border-primary/50 bg-primary/10"
+                        : "border-border/70 bg-background/40 text-muted-foreground",
+                    )}
+                    onDragOver={(event) => {
+                      event.preventDefault();
+                      setIsFileDropActive(true);
+                    }}
+                    onDragLeave={() => setIsFileDropActive(false)}
+                    onDrop={(event) => void handleFileDrop(event)}
+                  >
+                    Drop files or folders here or choose them below.
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    <Button size="sm" onClick={() => void handleEncryptFiles()} disabled={selectedFilePaths.length === 0}>
+                      Encrypt
+                    </Button>
+                    <Button size="sm" variant="secondary" onClick={() => void handleDecryptFiles()} disabled={selectedFilePaths.length === 0}>
+                      Decrypt
+                    </Button>
+                    <Button size="sm" variant="secondary" onClick={() => void handleSignFiles()} disabled={selectedFilePaths.length === 0}>
+                      Sign
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={clearSelectedFiles} disabled={selectedFilePaths.length === 0}>
+                      Clear
+                    </Button>
+                  </div>
+
+                  <div className="rounded-xl border border-border/70 bg-background/50 p-3">
+                    <div className="mb-2 text-sm font-medium">
+                      {fileCryptoMode === "smime" ? "Certificate Recipients" : "File Recipients"}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {fileCryptoMode === "smime" ? (
+                        selectedX509RecipientLabels.length > 0 ? (
+                          selectedX509RecipientLabels.map((recipient) => (
+                            <Badge key={recipient.fingerprint} variant="default">
+                              {recipient.label}
+                            </Badge>
+                          ))
+                        ) : (
+                          <Badge variant="secondary">No X.509 recipients selected</Badge>
+                        )
+                      ) : useSignatureForOutput ? (
+                        <Badge variant="outline">Anyone</Badge>
+                      ) : selectedRecipientLabels.length > 0 ? (
+                        selectedRecipientLabels.map((recipient) => (
+                          <Badge key={recipient.fingerprint} variant="default">
+                            {recipient.label}
+                          </Badge>
+                        ))
+                      ) : (
+                        <Badge variant="secondary">No recipients selected</Badge>
+                      )}
+                    </div>
+                    <div className="mt-2 text-xs text-muted-foreground">
+                      {fileCryptoMode === "smime"
+                        ? selectedX509Recipients.length > 0
+                          ? "Selected X.509 certificates will be used for S/MIME encryption."
+                          : "Choose one or more X.509 certificates below to encrypt CMS files."
+                        : useSignatureForOutput
+                        ? "Signature mode is not encrypted to specific recipients."
+                        : status.selected_recipients.length > 0
+                        ? "Selected recipients will be used for file encryption."
+                        : "Choose one or more recipient keys in the left column to encrypt files."}
+                    </div>
+                  </div>
+
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div className="rounded-xl border border-border/70 bg-background/50 p-3">
+                      <div className="mb-2 text-sm font-medium">Operation Targets</div>
+                      <div className="space-y-2 text-xs text-muted-foreground">
+                        <div>
+                          Output folder:
+                          <div className="mt-1 break-all text-foreground">
+                            {fileOutputDir || "Choose an output folder to enable file transforms."}
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-3 gap-2 pt-1">
+                          <Badge variant="outline">{selectedFilePaths.length} queued</Badge>
+                          <Badge variant="outline">{fileOperationResults.length} recent outputs</Badge>
+                          <Badge variant="outline">{status.selected_recipients.length} recipients</Badge>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-border/70 bg-background/50 p-3">
+                      <div className="mb-2 text-sm font-medium">Verify Detached Signature</div>
+                      <div className="space-y-2">
+                        <Button size="sm" variant="secondary" onClick={() => void pickVerifyInputFile()}>
+                          Choose File
+                        </Button>
+                        <div className="truncate text-xs text-muted-foreground">
+                          {verifyInputPath || "No file selected"}
+                        </div>
+                        <Button size="sm" variant="secondary" onClick={() => void pickVerifySignatureFile()}>
+                          Choose Signature
+                        </Button>
+                        <div className="truncate text-xs text-muted-foreground">
+                          {verifySignaturePath || "No signature selected"}
+                        </div>
+                        {fileVerificationStatus ? (
+                          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                            <Badge variant={signatureBadgeVariant(fileVerificationStatus.state)}>
+                              {fileVerificationStatus.state}
+                            </Badge>
+                            <span>{fileVerificationStatus.summary}</span>
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-4 md:flex-1 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                    <div className="rounded-xl border border-border/70 bg-background/50 p-3 md:flex md:min-h-0 md:flex-col">
+                      <div className="mb-2 text-sm font-medium">Queued Files</div>
+                      <ScrollArea className="max-h-[320px] pr-3 md:min-h-0 md:flex-1">
+                        <div className="space-y-2">
+                          {selectedFilePaths.length === 0 ? (
+                            <div className="rounded-lg border border-dashed border-border p-3 text-sm text-muted-foreground">
+                              Add files here, then run encrypt, decrypt, or sign.
+                            </div>
+                          ) : (
+                            selectedFilePaths.map((path) => (
+                              <div
+                                key={path}
+                                className="rounded-lg border border-border/70 bg-background/60 px-3 py-2 text-sm"
+                              >
+                                <div className="truncate font-medium">{filePathLabel(path)}</div>
+                                <div className="truncate text-xs text-muted-foreground">{path}</div>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      </ScrollArea>
+                    </div>
+
+                    <div className="rounded-xl border border-border/70 bg-background/50 p-3 md:flex md:min-h-0 md:flex-col">
+                      <div className="mb-2 text-sm font-medium">Recent Outputs</div>
+                      <ScrollArea className="max-h-[320px] pr-3 md:min-h-0 md:flex-1">
+                        <div className="space-y-2">
+                          {fileOperationResults.length === 0 ? (
+                            <div className="rounded-lg border border-dashed border-border p-3 text-sm text-muted-foreground">
+                              Completed file operations will appear here.
+                            </div>
+                          ) : (
+                            fileOperationResults.map((result) => (
+                              <div
+                                key={`${result.input_path}-${result.output_path}`}
+                                className="rounded-lg border border-border/70 bg-background/60 px-3 py-2 text-xs text-muted-foreground"
+                              >
+                                <div className="font-medium text-foreground">{result.operation}</div>
+                                <div className="truncate">{result.input_path}</div>
+                                <div className="truncate">{result.output_path}</div>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      </ScrollArea>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
           ) : (
             <div className="grid gap-4 md:grid-cols-[320px_minmax(0,1fr)]">
               <aside className="space-y-4">
@@ -2880,6 +4867,16 @@ export function App() {
                         </label>
                       </div>
                     </div>
+                    <div className="relative">
+                      <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                      <Input
+                        className="h-9 pl-9"
+                        type="search"
+                        value={keySearch}
+                        placeholder="Filter keys"
+                        onChange={(event) => setKeySearch(event.target.value)}
+                      />
+                    </div>
                     <div className="grid grid-cols-2 gap-2">
                       <Button size="sm" variant="secondary" onClick={() => setIsCreateKeyOpen(true)}>
                         <Plus className="h-4 w-4" />
@@ -2892,19 +4889,84 @@ export function App() {
                             Import
                           </Button>
                         </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end" side="bottom" className="w-36">
+                        <DropdownMenuContent align="end" side="bottom" className="w-40">
                           <DropdownMenuItem onClick={() => void handleImportKey()}>File</DropdownMenuItem>
                           <DropdownMenuItem onClick={() => void handleImportClipboard()}>
                             Clipboard
                           </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => setIsLookupDialogOpen(true)}>
+                            Lookup
+                          </DropdownMenuItem>
                         </DropdownMenuContent>
                       </DropdownMenu>
+                      <Button size="sm" variant="secondary" onClick={() => void handleRefreshAllKeys()}>
+                        Sync
+                      </Button>
                     </div>
                   </CardHeader>
                   <CardContent className="pt-0">
+                    {latestImportResult ? (
+                      <div className="mb-4 rounded-lg border border-border/70 bg-background/40 p-3">
+                        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                          <Badge variant="outline">{latestImportResult.imported} imported</Badge>
+                          <Badge variant="outline">{latestImportResult.unchanged} unchanged</Badge>
+                          <Badge variant="outline">{latestImportResult.secret_imported} secret</Badge>
+                        </div>
+                        <div className="mt-2 text-sm text-muted-foreground">{latestImportResult.summary}</div>
+                        {latestImportedKeys.length > 0 ? (
+                          <div className="mt-3">
+                            <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
+                              New Keys
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              {latestImportedKeys.map((key) => (
+                                <Button
+                                  key={key.fingerprint}
+                                  size="sm"
+                                  variant="secondary"
+                                  className="max-w-full justify-start overflow-hidden"
+                                  onClick={() => setSelectedKeyFingerprint(key.fingerprint)}
+                                >
+                                  <span className="truncate">
+                                    {key.user_ids[0] ?? formatFingerprint(key.fingerprint)}
+                                  </span>
+                                </Button>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                        {latestUnchangedKeys.length > 0 ? (
+                          <div className="mt-3">
+                            <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
+                              Already Present
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              {latestUnchangedKeys.map((key) => (
+                                <Button
+                                  key={key.fingerprint}
+                                  size="sm"
+                                  variant="ghost"
+                                  className="max-w-full justify-start overflow-hidden"
+                                  onClick={() => setSelectedKeyFingerprint(key.fingerprint)}
+                                >
+                                  <span className="truncate">
+                                    {key.user_ids[0] ?? formatFingerprint(key.fingerprint)}
+                                  </span>
+                                </Button>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
                     <ScrollArea className="h-[620px] pr-3">
                       <div className="space-y-2">
-                        {orderedKeys.map((key) => (
+                        {filteredOrderedKeys.length === 0 ? (
+                          <div className="rounded-lg border border-dashed border-border p-3 text-sm text-muted-foreground">
+                            {keySearch.trim() ? "No keys match this filter." : "No keys imported yet."}
+                          </div>
+                        ) : (
+                        filteredOrderedKeys.map((key) => (
                           <button
                             key={key.fingerprint}
                             className={cn(
@@ -2931,7 +4993,7 @@ export function App() {
                               <span>{key.trust}</span>
                             </div>
                           </button>
-                        ))}
+                        )))}
                       </div>
                     </ScrollArea>
                   </CardContent>
@@ -2988,6 +5050,9 @@ export function App() {
                           >
                             Export Secret
                           </Button>
+                          <Button size="sm" variant="ghost" onClick={openKeyToolsDialog}>
+                            Manage
+                          </Button>
                           <Button
                             size="sm"
                             variant="ghost"
@@ -3006,10 +5071,31 @@ export function App() {
                       </div>
                     ) : selectedKeyDetails ? (
                       <>
-                        <div className="grid gap-3 md:grid-cols-2">
-                          <div className="rounded-lg border border-border/70 bg-background/40 p-3">
-                            <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">Identity</div>
-                            <div className="space-y-2 text-sm">
+                        {(() => {
+                          const warnings = keyStatusWarnings(selectedKeyDetails.summary);
+                          return (
+                            <>
+                        {latestImportResult ? (
+                          <div className="rounded-lg border border-border/70 bg-background/40 px-3 py-2 text-sm text-muted-foreground">
+                            <div>{latestImportResult.summary}</div>
+                            {latestImportResult.unchanged > 0 ? (
+                              <div className="mt-1 text-xs">
+                                {latestImportResult.unchanged} matching key
+                                {latestImportResult.unchanged === 1 ? " was" : "s were"} already present.
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
+                        {latestKeyAction &&
+                        latestKeyAction.fingerprint === selectedKeyDetails.summary.fingerprint ? (
+                          <div className="rounded-lg border border-border/70 bg-background/40 px-3 py-2 text-sm text-muted-foreground">
+                            {latestKeyAction.summary}
+                          </div>
+                        ) : null}
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <div className="rounded-lg border border-border/70 bg-background/40 p-3">
+                        <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">Identity</div>
+                        <div className="space-y-2 text-sm">
                               {selectedKeyDetails.summary.user_ids.map((userId) => (
                                 <div key={userId} className="rounded-md bg-background/60 px-3 py-2">
                                   {userId}
@@ -3025,6 +5111,85 @@ export function App() {
                               <div>Expires: <span className="text-foreground">{formatTimestamp(selectedKeyDetails.summary.expires_at)}</span></div>
                               <div>Key ID: <code className="text-foreground">{selectedKeyDetails.summary.key_id}</code></div>
                             </div>
+                          </div>
+                          <div className="rounded-lg border border-border/70 bg-background/40 p-3">
+                            <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">Guidance</div>
+                            <div className="space-y-2 text-sm text-muted-foreground">
+                              <div>{keyRoleSummary(selectedKeyDetails.summary)}</div>
+                              <div>{keyTrustSummary(selectedKeyDetails.summary)}</div>
+                              {warnings.length > 0 ? (
+                                <div className="rounded-md border border-border/70 bg-background/60 px-3 py-2 text-xs">
+                                  {warnings.join(" ")}
+                                </div>
+                              ) : null}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="rounded-lg border border-border/70 bg-background/40 p-3">
+                          <div className="mb-2 flex items-center justify-between gap-2">
+                            <div className="text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
+                              Hardware Token
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() =>
+                                  void refreshSmartcardStatus().then((next) => {
+                                    if (next) {
+                                      recordActivity("key", "Refreshed hardware token status", next.summary);
+                                    }
+                                  })
+                                }
+                              >
+                                {isLoadingSmartcardStatus ? "Refreshing..." : "Refresh"}
+                              </Button>
+                              <Button size="sm" variant="ghost" onClick={() => void handleRestartSmartcardService()}>
+                                Restart Service
+                              </Button>
+                              <Button size="sm" variant="ghost" onClick={() => void handleChangeSmartcardPin()}>
+                                Change PIN
+                              </Button>
+                              <Button size="sm" variant="ghost" onClick={() => void handleFetchSmartcardPublicKey()}>
+                                Fetch Key
+                              </Button>
+                              <Button size="sm" variant="ghost" onClick={() => void handleCreateSmartcardKeyStubs()}>
+                                Sync Stubs
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                disabled={smartcardMovableKeyOptions.length === 0}
+                                onClick={openSmartcardStoreDialog}
+                              >
+                                Store Key
+                              </Button>
+                              <Button size="sm" variant="ghost" onClick={() => setIsSmartcardGenerateDialogOpen(true)}>
+                                Generate
+                              </Button>
+                              <Button size="sm" variant="ghost" onClick={() => void handleFactoryResetSmartcard()}>
+                                Factory Reset
+                              </Button>
+                            </div>
+                          </div>
+                          <div className="space-y-2 text-sm text-muted-foreground">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <Badge variant={smartcardStatus.available ? "default" : "secondary"}>
+                                {smartcardStatus.available ? "Detected" : "Not detected"}
+                              </Badge>
+                              <span>{smartcardStatus.summary}</span>
+                            </div>
+                            <div>Reader: <span className="text-foreground">{smartcardStatus.reader ?? "None"}</span></div>
+                            <div>Cardholder: <span className="text-foreground">{smartcardStatus.cardholder ?? "Unknown"}</span></div>
+                            <div>Serial: <code className="text-foreground">{smartcardStatus.serial_number ?? "Unavailable"}</code></div>
+                            {smartcardStatus.available ? (
+                              <div className="grid gap-1 text-xs">
+                                <div>Sign key: <code className="text-foreground">{smartcardStatus.signature_key ?? "Unavailable"}</code></div>
+                                <div>Encrypt key: <code className="text-foreground">{smartcardStatus.encryption_key ?? "Unavailable"}</code></div>
+                                <div>Auth key: <code className="text-foreground">{smartcardStatus.authentication_key ?? "Unavailable"}</code></div>
+                              </div>
+                            ) : null}
                           </div>
                         </div>
 
@@ -3073,6 +5238,49 @@ export function App() {
                             ))}
                           </div>
                         </div>
+
+                        <div className="rounded-lg border border-border/70 bg-background/40 p-3">
+                          <div className="mb-3 text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">Certifications</div>
+                          <div className="space-y-2">
+                            {selectedKeyDetails.certifications.length > 0 ? (
+                              selectedKeyDetails.certifications.map((certification) => (
+                                <div
+                                  key={`${certification.signer_key_id}-${certification.created_at ?? 0}-${certification.subject_user_id ?? "key"}`}
+                                  className="rounded-lg border border-border/70 bg-background/60 p-3"
+                                >
+                                  <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <div className="min-w-0 text-sm font-medium">
+                                      {certification.signer_label}
+                                    </div>
+                                    <Badge variant={certification.is_self_signature ? "secondary" : "outline"}>
+                                      {certification.kind}
+                                    </Badge>
+                                  </div>
+                                  <div className="mt-2 grid gap-1 text-xs text-muted-foreground">
+                                    <div>
+                                      Signer: <code className="text-foreground">{certification.signer_key_id}</code>
+                                    </div>
+                                    <div>
+                                      Date: <span className="text-foreground">{formatTimestamp(certification.created_at)}</span>
+                                    </div>
+                                    {certification.subject_user_id ? (
+                                      <div>
+                                        Subject: <span className="text-foreground">{certification.subject_user_id}</span>
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                </div>
+                              ))
+                            ) : (
+                              <div className="rounded-md border border-dashed border-border px-3 py-2 text-sm text-muted-foreground">
+                                No certification records were reported for this key.
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                            </>
+                          );
+                        })()}
                       </>
                     ) : (
                       <div className="rounded-lg border border-dashed border-border p-6 text-sm text-muted-foreground">
@@ -3081,9 +5289,248 @@ export function App() {
                     )}
                   </CardContent>
                 </Card>
+
+                <Card className="border-white/10 bg-card/75">
+                  <CardHeader className="space-y-3 pb-3">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <CardTitle className="text-base">X.509 Certificates</CardTitle>
+                        <CardDescription>
+                          Certificate inventory for CMS / S-MIME workflows.
+                        </CardDescription>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <Button size="sm" variant="secondary" onClick={() => void refreshX509Certificates()}>
+                          Refresh
+                        </Button>
+                        <Button size="sm" variant="secondary" onClick={() => setIsCreateX509DialogOpen(true)}>
+                          Create
+                        </Button>
+                        <Button size="sm" variant="secondary" onClick={() => void handleLearnX509Card()}>
+                          Learn Card
+                        </Button>
+                        <Button size="sm" variant="secondary" onClick={() => void handleImportX509Certificate()}>
+                          Import
+                        </Button>
+                        <Button size="sm" variant="secondary" onClick={() => setIsPasteX509DialogOpen(true)}>
+                          Paste
+                        </Button>
+                        <Button size="sm" variant="secondary" onClick={() => void handleImportX509Crl()}>
+                          Import CRL
+                        </Button>
+                        {selectedX509Certificate ? (
+                          <Button size="sm" variant="ghost" onClick={() => void handleExportX509Certificate(selectedX509Certificate)}>
+                            Export
+                          </Button>
+                        ) : null}
+                        {selectedX509Certificate ? (
+                          <Button size="sm" variant="ghost" onClick={() => void handleRefreshX509Validation(selectedX509Certificate)}>
+                            Validate
+                          </Button>
+                        ) : null}
+                        {selectedX509Certificate?.has_secret ? (
+                          <Button size="sm" variant="ghost" onClick={() => void handleExportX509SecretKey(selectedX509Certificate)}>
+                            Export PKCS#12
+                          </Button>
+                        ) : null}
+                        {selectedX509Certificate?.has_secret ? (
+                          <Button size="sm" variant="ghost" onClick={() => void handleExportX509SecretKeyP8(selectedX509Certificate)}>
+                            Export PKCS#8
+                          </Button>
+                        ) : null}
+                        {selectedX509Certificate?.has_secret ? (
+                          <Button size="sm" variant="ghost" onClick={() => void handleChangeX509Passphrase(selectedX509Certificate)}>
+                            Change Passphrase
+                          </Button>
+                        ) : null}
+                        {selectedX509Certificate ? (
+                          <Button size="sm" variant="ghost" onClick={() => void handleDeleteX509Certificate(selectedX509Certificate)}>
+                            Remove
+                          </Button>
+                        ) : null}
+                      </div>
+                    </div>
+                  </CardHeader>
+                  <CardContent className="space-y-4 pt-0">
+                    {x509Certificates.length === 0 ? (
+                      <div className="rounded-lg border border-dashed border-border p-3 text-sm text-muted-foreground">
+                        No X.509 certificates are currently available.
+                      </div>
+                    ) : (
+                      <div className="grid gap-3 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
+                        <ScrollArea className="max-h-[320px] pr-3">
+                          <div className="space-y-2">
+                            {x509Certificates.map((certificate) => (
+                              <button
+                                key={certificate.fingerprint}
+                                className={cn(
+                                  "w-full rounded-lg border px-3 py-3 text-left transition-colors",
+                                  selectedX509Fingerprint === certificate.fingerprint
+                                    ? "border-primary/40 bg-primary/10"
+                                    : "border-border/70 bg-background/40 hover:bg-accent",
+                                )}
+                                onClick={() => setSelectedX509Fingerprint(certificate.fingerprint)}
+                              >
+                                <div className="flex items-center justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <div className="truncate text-sm font-medium">{certificate.subject}</div>
+                                    <div className="truncate text-xs text-muted-foreground">
+                                      {certificate.algorithm} {certificate.bits ? `• ${certificate.bits}-bit` : ""}
+                                    </div>
+                                  </div>
+                                  <div className="flex flex-wrap items-center justify-end gap-2">
+                                    {certificate.is_trusted_root ? (
+                                      <Badge variant="outline">Trusted root</Badge>
+                                    ) : null}
+                                    <Badge variant={certificate.has_secret ? "default" : "secondary"}>
+                                      {certificate.has_secret ? "Private" : "Public"}
+                                    </Badge>
+                                  </div>
+                                </div>
+                                <div className="mt-2 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                                  <span>{certificate.validity}</span>
+                                  <code>{formatFingerprint(certificate.fingerprint)}</code>
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        </ScrollArea>
+
+                        {selectedX509Certificate ? (
+                          <div className="rounded-lg border border-border/70 bg-background/40 p-3">
+                            <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">Certificate Details</div>
+                            <div className="grid gap-2 text-sm text-muted-foreground">
+                              <div>Subject: <span className="text-foreground">{selectedX509Certificate.subject}</span></div>
+                              <div>Issuer: <span className="text-foreground">{selectedX509Certificate.issuer || "Unknown"}</span></div>
+                              <div>Validity: <span className="text-foreground">{selectedX509Certificate.validity}</span></div>
+                              <div>Trust Root: <span className="text-foreground">{selectedX509Certificate.is_trusted_root ? "Yes" : "No"}</span></div>
+                              <div>Serial: <code className="text-foreground">{selectedX509Certificate.serial_number || "Unavailable"}</code></div>
+                              <div>Created: <span className="text-foreground">{selectedX509Certificate.created_at ?? "Unknown"}</span></div>
+                              <div>Expires: <span className="text-foreground">{selectedX509Certificate.expires_at ?? "None"}</span></div>
+                              <div>Key ID: <code className="text-foreground">{selectedX509Certificate.key_id}</code></div>
+                              <div>Fingerprint: <code className="break-all text-foreground">{selectedX509Certificate.fingerprint}</code></div>
+                            </div>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                disabled={!selectedX509Certificate.has_secret}
+                                onClick={() => handleX509SignerSelection(selectedX509Certificate.fingerprint)}
+                              >
+                                {selectedX509SignerFingerprint === selectedX509Certificate.fingerprint
+                                  ? "Active signer"
+                                  : "Use to sign/decrypt"}
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                onClick={() =>
+                                  handleX509RecipientSelection(
+                                    selectedX509Certificate.fingerprint,
+                                    !selectedX509Recipients.includes(selectedX509Certificate.fingerprint),
+                                  )
+                                }
+                              >
+                                {selectedX509Recipients.includes(selectedX509Certificate.fingerprint)
+                                  ? "Remove recipient"
+                                  : "Add recipient"}
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                onClick={() =>
+                                  void handleSetX509TrustRoot(
+                                    selectedX509Certificate,
+                                    !selectedX509Certificate.is_trusted_root,
+                                  )
+                                }
+                              >
+                                {selectedX509Certificate.is_trusted_root ? "Untrust root" : "Trust root"}
+                              </Button>
+                            </div>
+                            <div className="mt-4 rounded-md border border-border/70 bg-background/60 px-3 py-2 text-xs text-muted-foreground">
+                              {x509ValidationSummary(selectedX509Certificate.validity, selectedX509Chain)}
+                            </div>
+                            <div className="mt-4 rounded-md border border-border/70 bg-background/60 p-3">
+                              <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
+                                Trusted Roots
+                              </div>
+                              <div className="flex flex-wrap gap-2">
+                                <Button size="sm" variant="secondary" onClick={() => void handleImportX509Trustlist()}>
+                                  Import Snapshot
+                                </Button>
+                                <Button size="sm" variant="secondary" onClick={() => void handleExportX509Trustlist()}>
+                                  Export Snapshot
+                                </Button>
+                              </div>
+                              <div className="mt-2 text-xs text-muted-foreground">
+                                Manage trusted root snapshots for this GnuPG profile.
+                              </div>
+                            </div>
+                            <div className="mt-4 rounded-md border border-border/70 bg-background/60 p-3">
+                              <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
+                                Certificate Chain
+                              </div>
+                              {selectedX509Chain ? (
+                                <pre className="whitespace-pre-wrap break-words text-xs text-muted-foreground">
+                                  {selectedX509Chain}
+                                </pre>
+                              ) : (
+                                <div className="text-xs text-muted-foreground">
+                                  No chain information is currently available.
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
               </div>
             </div>
           )}
+
+          <Card className="border-white/10 bg-card/75">
+            <CardHeader className="space-y-1 pb-3">
+              <div className="flex items-center justify-between gap-2">
+                <CardTitle className="text-base">Recent Activity</CardTitle>
+                {activityLog.length > 0 ? (
+                  <Button size="sm" variant="ghost" onClick={() => setActivityLog([])}>
+                    Clear
+                  </Button>
+                ) : null}
+              </div>
+              <CardDescription>
+                Persistent history for note, file, and key actions on this device.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="pt-0">
+              <ScrollArea className="max-h-[220px] pr-3">
+                <div className="space-y-2">
+                  {activityLog.length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-border p-3 text-sm text-muted-foreground">
+                      Activity will appear here as you work.
+                    </div>
+                  ) : (
+                    activityLog.map((item) => (
+                      <div
+                        key={item.id}
+                        className="rounded-lg border border-border/70 bg-background/40 px-3 py-2"
+                      >
+                        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                          <Badge variant={activityBadgeVariant(item.kind)}>{item.kind}</Badge>
+                          <span>{formatActivityTime(item.at)}</span>
+                        </div>
+                        <div className="mt-1 text-sm font-medium text-foreground">{item.title}</div>
+                        <div className="text-xs text-muted-foreground">{item.detail}</div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </ScrollArea>
+            </CardContent>
+          </Card>
         </div>
       </div>
     </div>

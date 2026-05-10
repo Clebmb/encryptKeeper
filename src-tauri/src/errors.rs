@@ -10,8 +10,6 @@ pub enum AppError {
     GpgUnavailable,
     #[error("Vault is not open.")]
     VaultNotOpen,
-    #[error("Archive support is not implemented in this MVP build.")]
-    ArchiveNotImplemented,
     #[error("Session is locked.")]
     SessionLocked,
     #[error("No private key has been selected.")]

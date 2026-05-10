@@ -1,13 +1,19 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use tauri::{AppHandle, Manager, State};
+use walkdir::WalkDir;
 
 use crate::{
     app_state::AppState,
     errors::{AppError, AppResult},
     models::{
-        ClipboardNoteContent, FileOperationResult, KeyDetails, KeySummary, NoteEncryptionStatus,
-        NoteRecipientInfo, NoteSignatureStatus, OpenNoteResult, PinnedKeySettings, SessionStatus,
+        ClipboardNoteContent, FileOperationResult, ImportKeyResult, KeyActionResult, KeyDetails,
+        KeySummary, KeyserverSearchResult, NoteEncryptionStatus, NoteRecipientInfo,
+        NoteSignatureStatus, OpenNoteResult, PinnedKeySettings, SessionStatus, SmartcardStatus,
+        X509CertificateSummary,
     },
 };
 
@@ -51,30 +57,103 @@ fn file_name_string(path: &PathBuf) -> String {
         .unwrap_or_else(|| "file".to_string())
 }
 
-fn encrypted_output_path(output_dir: &str, input_path: &str) -> PathBuf {
-    let source = PathBuf::from(input_path);
-    let mut file_name = file_name_string(&source);
-    if !file_name.ends_with(".gpg") {
-        file_name.push_str(".gpg");
+struct BatchInput {
+    input_path: PathBuf,
+    relative_output: PathBuf,
+}
+
+fn relative_output_with_extension(relative_output: &Path, suffix: &str) -> PathBuf {
+    let mut output = relative_output.to_path_buf();
+    let file_name = output
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| format!("{value}{suffix}"))
+        .unwrap_or_else(|| format!("file{suffix}"));
+    output.set_file_name(file_name);
+    output
+}
+
+fn relative_output_without_gpg(relative_output: &Path) -> PathBuf {
+    let mut output = relative_output.to_path_buf();
+    let file_name = output
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| {
+            value
+                .strip_suffix(".gpg")
+                .or_else(|| value.strip_suffix(".GPG"))
+                .unwrap_or(value)
+                .to_string()
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "file.decrypted".to_string());
+    output.set_file_name(file_name);
+    output
+}
+
+fn relative_output_without_suffix(
+    relative_output: &Path,
+    suffixes: &[&str],
+    fallback_suffix: &str,
+) -> PathBuf {
+    let mut output = relative_output.to_path_buf();
+    let file_name = output
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| {
+            suffixes
+                .iter()
+                .find_map(|suffix| value.strip_suffix(suffix))
+                .unwrap_or(value)
+                .to_string()
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("file{fallback_suffix}"));
+    output.set_file_name(file_name);
+    output
+}
+
+fn collect_batch_inputs(input_paths: &[String]) -> AppResult<Vec<BatchInput>> {
+    let mut batch_inputs = Vec::new();
+
+    for input_path in input_paths {
+        let source = PathBuf::from(input_path);
+        if source.is_file() {
+            batch_inputs.push(BatchInput {
+                relative_output: PathBuf::from(file_name_string(&source)),
+                input_path: source,
+            });
+            continue;
+        }
+
+        if source.is_dir() {
+            let root_name = source
+                .file_name()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("folder"));
+            for entry in WalkDir::new(&source).into_iter().filter_map(Result::ok) {
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let relative = entry
+                    .path()
+                    .strip_prefix(&source)
+                    .map_err(|cause| AppError::External(cause.to_string()))?;
+                batch_inputs.push(BatchInput {
+                    input_path: entry.path().to_path_buf(),
+                    relative_output: root_name.join(relative),
+                });
+            }
+            continue;
+        }
+
+        return Err(AppError::Validation(format!(
+            "Path could not be processed: {}",
+            source.display()
+        )));
     }
-    PathBuf::from(output_dir).join(file_name)
-}
 
-fn detached_signature_output_path(output_dir: &str, input_path: &str) -> PathBuf {
-    let source = PathBuf::from(input_path);
-    let file_name = format!("{}.sig", file_name_string(&source));
-    PathBuf::from(output_dir).join(file_name)
-}
-
-fn decrypted_output_path(output_dir: &str, input_path: &str) -> PathBuf {
-    let source = PathBuf::from(input_path);
-    let file_name = file_name_string(&source);
-    let final_name = if let Some(trimmed) = file_name.strip_suffix(".gpg") {
-        trimmed.to_string()
-    } else {
-        format!("{file_name}.decrypted")
-    };
-    PathBuf::from(output_dir).join(final_name)
+    Ok(batch_inputs)
 }
 
 #[tauri::command]
@@ -95,7 +174,7 @@ pub fn get_status(state: State<'_, AppState>) -> AppResult<SessionStatus> {
     Ok(SessionStatus {
         vault_kind: vault.vault_kind().to_string(),
         vault_path: vault.vault_path(),
-        archive_unlocked: false,
+        archive_unlocked: vault.is_archive_open(),
         session_unlocked: session.is_unlocked(),
         selected_private_key: keys.selected_private_key(),
         selected_recipients: keys.selected_recipients(),
@@ -122,6 +201,24 @@ pub fn open_folder_vault(
         .write()
         .map_err(|_| AppError::External("vault lock poisoned".into()))?;
     vault.open_folder(PathBuf::from(path), recursive)
+}
+
+#[tauri::command]
+pub fn open_archive_vault(
+    path: String,
+    recursive: bool,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<crate::models::NoteSummary>> {
+    let mut session = state
+        .session
+        .write()
+        .map_err(|_| AppError::External("session lock poisoned".into()))?;
+    session.set_recursive_scan(recursive);
+    let mut vault = state
+        .vault
+        .write()
+        .map_err(|_| AppError::External("vault lock poisoned".into()))?;
+    vault.open_archive(PathBuf::from(path), recursive)
 }
 
 #[tauri::command]
@@ -511,17 +608,21 @@ pub fn encrypt_files(
     fs::create_dir_all(&output_dir)?;
 
     let mut results = Vec::new();
-    for input_path in input_paths {
-        let output_path = encrypted_output_path(&output_dir, &input_path);
+    for batch_input in collect_batch_inputs(&input_paths)? {
+        let output_path = PathBuf::from(&output_dir)
+            .join(relative_output_with_extension(&batch_input.relative_output, ".gpg"));
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         state.crypto.encrypt_file_to_file(
             &recipients,
             &signer,
             &passphrase,
-            PathBuf::from(&input_path).as_path(),
+            batch_input.input_path.as_path(),
             output_path.as_path(),
         )?;
         results.push(FileOperationResult {
-            input_path: input_path.clone(),
+            input_path: batch_input.input_path.display().to_string(),
             output_path: output_path.display().to_string(),
             operation: "encrypt".into(),
         });
@@ -539,15 +640,19 @@ pub fn decrypt_files(
     fs::create_dir_all(&output_dir)?;
 
     let mut results = Vec::new();
-    for input_path in input_paths {
-        let output_path = decrypted_output_path(&output_dir, &input_path);
+    for batch_input in collect_batch_inputs(&input_paths)? {
+        let output_path =
+            PathBuf::from(&output_dir).join(relative_output_without_gpg(&batch_input.relative_output));
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         state.crypto.decrypt_file_to_path(
-            PathBuf::from(&input_path).as_path(),
+            batch_input.input_path.as_path(),
             output_path.as_path(),
             &passphrase,
         )?;
         results.push(FileOperationResult {
-            input_path: input_path.clone(),
+            input_path: batch_input.input_path.display().to_string(),
             output_path: output_path.display().to_string(),
             operation: "decrypt".into(),
         });
@@ -566,16 +671,20 @@ pub fn sign_files(
     fs::create_dir_all(&output_dir)?;
 
     let mut results = Vec::new();
-    for input_path in input_paths {
-        let output_path = detached_signature_output_path(&output_dir, &input_path);
+    for batch_input in collect_batch_inputs(&input_paths)? {
+        let output_path = PathBuf::from(&output_dir)
+            .join(relative_output_with_extension(&batch_input.relative_output, ".sig"));
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         state.crypto.create_detached_signature(
             &signer,
             &passphrase,
-            PathBuf::from(&input_path).as_path(),
+            batch_input.input_path.as_path(),
             output_path.as_path(),
         )?;
         results.push(FileOperationResult {
-            input_path: input_path.clone(),
+            input_path: batch_input.input_path.display().to_string(),
             output_path: output_path.display().to_string(),
             operation: "sign".into(),
         });
@@ -598,13 +707,227 @@ pub fn verify_file_signature(
 }
 
 #[tauri::command]
-pub fn import_key_from_file(path: String, state: State<'_, AppState>) -> AppResult<()> {
+pub fn encrypt_cms_files(
+    input_paths: Vec<String>,
+    output_dir: String,
+    recipients: Vec<String>,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<FileOperationResult>> {
+    fs::create_dir_all(&output_dir)?;
+
+    let mut results = Vec::new();
+    for batch_input in collect_batch_inputs(&input_paths)? {
+        let output_path = PathBuf::from(&output_dir)
+            .join(relative_output_with_extension(&batch_input.relative_output, ".p7m"));
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        state.crypto.encrypt_cms_file_to_file(
+            &recipients,
+            batch_input.input_path.as_path(),
+            output_path.as_path(),
+        )?;
+        results.push(FileOperationResult {
+            input_path: batch_input.input_path.display().to_string(),
+            output_path: output_path.display().to_string(),
+            operation: "encrypt-cms".into(),
+        });
+    }
+    Ok(results)
+}
+
+#[tauri::command]
+pub fn decrypt_cms_files(
+    input_paths: Vec<String>,
+    output_dir: String,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<FileOperationResult>> {
+    fs::create_dir_all(&output_dir)?;
+
+    let mut results = Vec::new();
+    for batch_input in collect_batch_inputs(&input_paths)? {
+        let output_path = PathBuf::from(&output_dir).join(relative_output_without_suffix(
+            &batch_input.relative_output,
+            &[".p7m", ".P7M"],
+            ".decrypted",
+        ));
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        state
+            .crypto
+            .decrypt_cms_file_to_path(batch_input.input_path.as_path(), output_path.as_path())?;
+        results.push(FileOperationResult {
+            input_path: batch_input.input_path.display().to_string(),
+            output_path: output_path.display().to_string(),
+            operation: "decrypt-cms".into(),
+        });
+    }
+    Ok(results)
+}
+
+#[tauri::command]
+pub fn sign_cms_files(
+    input_paths: Vec<String>,
+    output_dir: String,
+    signer: String,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<FileOperationResult>> {
+    fs::create_dir_all(&output_dir)?;
+
+    let mut results = Vec::new();
+    for batch_input in collect_batch_inputs(&input_paths)? {
+        let output_path = PathBuf::from(&output_dir)
+            .join(relative_output_with_extension(&batch_input.relative_output, ".p7s"));
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        state.crypto.create_cms_detached_signature(
+            &signer,
+            batch_input.input_path.as_path(),
+            output_path.as_path(),
+        )?;
+        results.push(FileOperationResult {
+            input_path: batch_input.input_path.display().to_string(),
+            output_path: output_path.display().to_string(),
+            operation: "sign-cms".into(),
+        });
+    }
+    Ok(results)
+}
+
+#[tauri::command]
+pub fn verify_cms_file_signature(
+    input_path: String,
+    signature_path: String,
+    state: State<'_, AppState>,
+) -> AppResult<NoteSignatureStatus> {
+    state.crypto.verify_cms_detached_signature(
+        PathBuf::from(signature_path).as_path(),
+        PathBuf::from(input_path).as_path(),
+    )
+}
+
+#[tauri::command]
+pub fn import_key_from_file(
+    path: String,
+    state: State<'_, AppState>,
+) -> AppResult<ImportKeyResult> {
     state.crypto.import_key(PathBuf::from(path).as_path())
 }
 
 #[tauri::command]
-pub fn import_key_from_text(armored_text: String, state: State<'_, AppState>) -> AppResult<()> {
+pub fn import_key_from_text(
+    armored_text: String,
+    state: State<'_, AppState>,
+) -> AppResult<ImportKeyResult> {
     state.crypto.import_key_text(&armored_text)
+}
+
+#[tauri::command]
+pub fn lookup_key(query: String, state: State<'_, AppState>) -> AppResult<ImportKeyResult> {
+    state.crypto.locate_keys(&query)
+}
+
+#[tauri::command]
+pub fn search_keyserver(
+    query: String,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<KeyserverSearchResult>> {
+    state.crypto.search_keyserver(&query)
+}
+
+#[tauri::command]
+pub fn import_key_from_keyserver(
+    fingerprint: String,
+    state: State<'_, AppState>,
+) -> AppResult<ImportKeyResult> {
+    state.crypto.receive_key_from_keyserver(&fingerprint)
+}
+
+#[tauri::command]
+pub fn publish_key_to_keyserver(
+    fingerprint: String,
+    state: State<'_, AppState>,
+) -> AppResult<KeyActionResult> {
+    state.crypto.send_key_to_keyserver(&fingerprint)
+}
+
+#[tauri::command]
+pub fn refresh_key_from_keyserver(
+    fingerprint: String,
+    state: State<'_, AppState>,
+) -> AppResult<KeyActionResult> {
+    state.crypto.refresh_key_from_keyserver(&fingerprint)
+}
+
+#[tauri::command]
+pub fn refresh_all_keys_from_keyserver(state: State<'_, AppState>) -> AppResult<KeyActionResult> {
+    state.crypto.refresh_all_keys_from_keyserver()
+}
+
+#[tauri::command]
+pub fn add_subkey(
+    fingerprint: String,
+    algorithm: String,
+    usage: String,
+    expire: String,
+    state: State<'_, AppState>,
+) -> AppResult<KeyActionResult> {
+    let passphrase = require_session_passphrase(&state)?;
+    state
+        .crypto
+        .quick_add_subkey(&fingerprint, &passphrase, &algorithm, &usage, &expire)
+}
+
+#[tauri::command]
+pub fn change_key_passphrase(
+    fingerprint: String,
+    new_passphrase: String,
+    state: State<'_, AppState>,
+) -> AppResult<KeyActionResult> {
+    let current_passphrase = require_session_passphrase(&state)?;
+    let selected_private_key = state
+        .keys
+        .read()
+        .map_err(|_| AppError::External("key manager lock poisoned".into()))?
+        .selected_private_key()
+        .ok_or(AppError::MissingPrivateKeySelection)?;
+    if !selected_private_key.eq_ignore_ascii_case(&fingerprint) {
+        return Err(AppError::Validation(
+            "Select and unlock this private key before changing its passphrase.".into(),
+        ));
+    }
+
+    let result = state
+        .crypto
+        .change_key_passphrase(&fingerprint, &current_passphrase, &new_passphrase)?;
+    let mut session = state
+        .session
+        .write()
+        .map_err(|_| AppError::External("session lock poisoned".into()))?;
+    session.unlock(new_passphrase);
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn export_ownertrust(
+    output_path: String,
+    state: State<'_, AppState>,
+) -> AppResult<KeyActionResult> {
+    state
+        .crypto
+        .export_ownertrust(PathBuf::from(output_path).as_path())
+}
+
+#[tauri::command]
+pub fn import_ownertrust(
+    input_path: String,
+    state: State<'_, AppState>,
+) -> AppResult<KeyActionResult> {
+    state
+        .crypto
+        .import_ownertrust(PathBuf::from(input_path).as_path())
 }
 
 #[tauri::command]
@@ -636,9 +959,10 @@ pub fn get_key_details(
 ) -> AppResult<KeyDetails> {
     let public_listing = state.crypto.list_keys(false)?;
     let secret_listing = state.crypto.list_keys(true)?;
+    let signatures_listing = state.crypto.list_key_signatures(&fingerprint)?;
     let details = state
         .crypto
-        .key_details(&public_listing, &secret_listing, &fingerprint)
+        .key_details(&public_listing, &secret_listing, &signatures_listing, &fingerprint)
         .ok_or_else(|| AppError::Validation("Key details could not be loaded.".into()))?;
     let key_manager = state
         .keys
@@ -655,7 +979,237 @@ pub fn get_key_details(
     Ok(KeyDetails {
         summary,
         subkeys: details.subkeys,
+        certifications: details.certifications,
     })
+}
+
+#[tauri::command]
+pub fn get_smartcard_status(state: State<'_, AppState>) -> AppResult<SmartcardStatus> {
+    state.crypto.smartcard_status()
+}
+
+#[tauri::command]
+pub fn list_x509_certificates(state: State<'_, AppState>) -> AppResult<Vec<X509CertificateSummary>> {
+    state.crypto.list_x509_certificates()
+}
+
+#[tauri::command]
+pub fn learn_x509_card(state: State<'_, AppState>) -> AppResult<KeyActionResult> {
+    state.crypto.learn_x509_card()
+}
+
+#[tauri::command]
+pub fn create_x509_certificate(
+    common_name: String,
+    organization: String,
+    email: String,
+    expires_at: String,
+    passphrase: String,
+    state: State<'_, AppState>,
+) -> AppResult<KeyActionResult> {
+    state.crypto.create_x509_certificate(
+        &common_name,
+        &organization,
+        &email,
+        &expires_at,
+        &passphrase,
+    )
+}
+
+#[tauri::command]
+pub fn import_x509_certificate(path: String, state: State<'_, AppState>) -> AppResult<KeyActionResult> {
+    state.crypto.import_x509_certificate(PathBuf::from(path).as_path())
+}
+
+#[tauri::command]
+pub fn import_x509_certificate_text(
+    certificate_text: String,
+    state: State<'_, AppState>,
+) -> AppResult<KeyActionResult> {
+    state.crypto.import_x509_certificate_text(&certificate_text)
+}
+
+#[tauri::command]
+pub fn export_x509_certificate(
+    fingerprint: String,
+    output_path: String,
+    state: State<'_, AppState>,
+) -> AppResult<KeyActionResult> {
+    state
+        .crypto
+        .export_x509_certificate(&fingerprint, PathBuf::from(output_path).as_path())
+}
+
+#[tauri::command]
+pub fn export_x509_secret_key_p12(
+    fingerprint: String,
+    output_path: String,
+    state: State<'_, AppState>,
+) -> AppResult<KeyActionResult> {
+    state
+        .crypto
+        .export_x509_secret_key_p12(&fingerprint, PathBuf::from(output_path).as_path())
+}
+
+#[tauri::command]
+pub fn export_x509_secret_key_p8(
+    fingerprint: String,
+    output_path: String,
+    state: State<'_, AppState>,
+) -> AppResult<KeyActionResult> {
+    state
+        .crypto
+        .export_x509_secret_key_p8(&fingerprint, PathBuf::from(output_path).as_path())
+}
+
+#[tauri::command]
+pub fn change_x509_passphrase(
+    fingerprint: String,
+    state: State<'_, AppState>,
+) -> AppResult<KeyActionResult> {
+    state.crypto.change_x509_passphrase(&fingerprint)
+}
+
+#[tauri::command]
+pub fn delete_x509_certificate(
+    fingerprint: String,
+    state: State<'_, AppState>,
+) -> AppResult<KeyActionResult> {
+    state.crypto.delete_x509_certificate(&fingerprint)
+}
+
+#[tauri::command]
+pub fn get_x509_certificate_chain(
+    fingerprint: String,
+    state: State<'_, AppState>,
+) -> AppResult<String> {
+    state.crypto.list_x509_certificate_chain(&fingerprint)
+}
+
+#[tauri::command]
+pub fn import_x509_crl(path: String, state: State<'_, AppState>) -> AppResult<KeyActionResult> {
+    state.crypto.import_x509_crl(PathBuf::from(path).as_path())
+}
+
+#[tauri::command]
+pub fn set_x509_trust_root(
+    fingerprint: String,
+    trusted: bool,
+    state: State<'_, AppState>,
+) -> AppResult<KeyActionResult> {
+    state.crypto.set_x509_trust_root(&fingerprint, trusted)
+}
+
+#[tauri::command]
+pub fn export_x509_trustlist(
+    output_path: String,
+    state: State<'_, AppState>,
+) -> AppResult<KeyActionResult> {
+    state
+        .crypto
+        .export_x509_trustlist(PathBuf::from(output_path).as_path())
+}
+
+#[tauri::command]
+pub fn import_x509_trustlist(
+    input_path: String,
+    state: State<'_, AppState>,
+) -> AppResult<KeyActionResult> {
+    state
+        .crypto
+        .import_x509_trustlist(PathBuf::from(input_path).as_path())
+}
+
+#[tauri::command]
+pub fn restart_smartcard_service(state: State<'_, AppState>) -> AppResult<KeyActionResult> {
+    state.crypto.restart_smartcard_service()
+}
+
+#[tauri::command]
+pub fn change_smartcard_pin(state: State<'_, AppState>) -> AppResult<KeyActionResult> {
+    state.crypto.change_smartcard_pin()
+}
+
+#[tauri::command]
+pub fn fetch_smartcard_public_key(state: State<'_, AppState>) -> AppResult<KeyActionResult> {
+    state.crypto.fetch_smartcard_public_key()
+}
+
+#[tauri::command]
+pub fn create_smartcard_key_stubs(state: State<'_, AppState>) -> AppResult<KeyActionResult> {
+    state.crypto.create_smartcard_key_stubs()
+}
+
+#[tauri::command]
+pub fn generate_smartcard_key(
+    slot: String,
+    algorithm: String,
+    force: bool,
+    state: State<'_, AppState>,
+) -> AppResult<KeyActionResult> {
+    state.crypto.generate_smartcard_key(&slot, &algorithm, force)
+}
+
+#[tauri::command]
+pub fn factory_reset_smartcard(state: State<'_, AppState>) -> AppResult<KeyActionResult> {
+    state.crypto.factory_reset_smartcard()
+}
+
+#[tauri::command]
+pub fn move_secret_key_to_smartcard(
+    fingerprint: String,
+    slot: String,
+    force: bool,
+    state: State<'_, AppState>,
+) -> AppResult<KeyActionResult> {
+    state
+        .crypto
+        .move_secret_key_to_smartcard(&fingerprint, &slot, force)
+}
+
+#[tauri::command]
+pub fn set_key_expiry(
+    fingerprint: String,
+    expire: String,
+    state: State<'_, AppState>,
+) -> AppResult<KeyActionResult> {
+    state.crypto.quick_set_expire(&fingerprint, &expire)
+}
+
+#[tauri::command]
+pub fn set_key_ownertrust(
+    fingerprint: String,
+    trust: String,
+    state: State<'_, AppState>,
+) -> AppResult<KeyActionResult> {
+    state.crypto.quick_set_ownertrust(&fingerprint, &trust)
+}
+
+#[tauri::command]
+pub fn certify_key(
+    fingerprint: String,
+    local_only: bool,
+    state: State<'_, AppState>,
+) -> AppResult<KeyActionResult> {
+    let passphrase = require_session_passphrase(&state)?;
+    let (signer, _) = selected_key_context(&state)?;
+    state
+        .crypto
+        .quick_sign_key(&signer, &passphrase, &fingerprint, local_only)
+}
+
+#[tauri::command]
+pub fn export_revocation_certificate(
+    fingerprint: String,
+    passphrase: String,
+    output_path: String,
+    state: State<'_, AppState>,
+) -> AppResult<KeyActionResult> {
+    state.crypto.export_revocation_certificate(
+        &fingerprint,
+        &passphrase,
+        PathBuf::from(output_path).as_path(),
+    )
 }
 
 #[tauri::command]
@@ -786,4 +1340,54 @@ pub fn update_preferences(
         session.set_auto_save(auto_save);
     }
     get_status(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::{collect_batch_inputs, relative_output_with_extension, relative_output_without_gpg};
+
+    #[test]
+    fn expands_folder_inputs_and_preserves_relative_structure() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path().join("batch");
+        fs::create_dir_all(root.join("nested")).expect("create nested");
+        fs::write(root.join("top.txt"), "top").expect("write top");
+        fs::write(root.join("nested").join("inside.txt"), "inside").expect("write nested");
+
+        let inputs = collect_batch_inputs(&[root.display().to_string()]).expect("collect batch inputs");
+
+        assert_eq!(inputs.len(), 2);
+        let mut relative_outputs = inputs
+            .iter()
+            .map(|item| item.relative_output.display().to_string())
+            .collect::<Vec<_>>();
+        relative_outputs.sort();
+        assert_eq!(
+            relative_outputs,
+            vec![
+                "batch\\nested\\inside.txt".to_string(),
+                "batch\\top.txt".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn transforms_relative_output_names_for_batch_operations() {
+        assert_eq!(
+            relative_output_with_extension("reports\\daily.txt".as_ref(), ".gpg")
+                .display()
+                .to_string(),
+            "reports\\daily.txt.gpg"
+        );
+        assert_eq!(
+            relative_output_without_gpg("reports\\daily.txt.gpg".as_ref())
+                .display()
+                .to_string(),
+            "reports\\daily.txt"
+        );
+    }
 }
