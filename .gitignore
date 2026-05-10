@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.vite/
+
+src-tauri/target/
+
+tauri-*.log
+tauri-*.err.log
+*.log
+
+.agents/
+
+.DS_Store
+Thumbs.db
