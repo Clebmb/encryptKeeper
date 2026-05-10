@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use tauri::{AppHandle, Manager, State};
 
@@ -6,8 +6,8 @@ use crate::{
     app_state::AppState,
     errors::{AppError, AppResult},
     models::{
-        ClipboardNoteContent, KeySummary, NoteEncryptionStatus, NoteRecipientInfo, OpenNoteResult,
-        PinnedKeySettings, SessionStatus,
+        ClipboardNoteContent, FileOperationResult, KeyDetails, KeySummary, NoteEncryptionStatus,
+        NoteRecipientInfo, NoteSignatureStatus, OpenNoteResult, PinnedKeySettings, SessionStatus,
     },
 };
 
@@ -15,6 +15,66 @@ fn app_config_dir(app: &AppHandle) -> AppResult<PathBuf> {
     app.path()
         .app_config_dir()
         .map_err(|cause| AppError::External(cause.to_string()))
+}
+
+fn require_session_passphrase(state: &State<'_, AppState>) -> AppResult<String> {
+    let mut session = state
+        .session
+        .write()
+        .map_err(|_| AppError::External("session lock poisoned".into()))?;
+    Ok(session.ensure_unlocked()?.to_string())
+}
+
+fn selected_key_context(state: &State<'_, AppState>) -> AppResult<(String, Vec<String>)> {
+    let key_manager = state
+        .keys
+        .read()
+        .map_err(|_| AppError::External("key manager lock poisoned".into()))?;
+    let signer = key_manager
+        .selected_private_key()
+        .ok_or(AppError::MissingPrivateKeySelection)?;
+    Ok((signer, key_manager.selected_recipients()))
+}
+
+fn key_identities(state: &State<'_, AppState>) -> AppResult<Vec<crate::services::crypto_service::ParsedKeyIdentity>> {
+    let public_listing = state.crypto.list_keys(false)?;
+    let secret_listing = state.crypto.list_keys(true)?;
+    Ok(state
+        .crypto
+        .parse_key_identities(&public_listing, &secret_listing))
+}
+
+fn file_name_string(path: &PathBuf) -> String {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| "file".to_string())
+}
+
+fn encrypted_output_path(output_dir: &str, input_path: &str) -> PathBuf {
+    let source = PathBuf::from(input_path);
+    let mut file_name = file_name_string(&source);
+    if !file_name.ends_with(".gpg") {
+        file_name.push_str(".gpg");
+    }
+    PathBuf::from(output_dir).join(file_name)
+}
+
+fn detached_signature_output_path(output_dir: &str, input_path: &str) -> PathBuf {
+    let source = PathBuf::from(input_path);
+    let file_name = format!("{}.sig", file_name_string(&source));
+    PathBuf::from(output_dir).join(file_name)
+}
+
+fn decrypted_output_path(output_dir: &str, input_path: &str) -> PathBuf {
+    let source = PathBuf::from(input_path);
+    let file_name = file_name_string(&source);
+    let final_name = if let Some(trimmed) = file_name.strip_suffix(".gpg") {
+        trimmed.to_string()
+    } else {
+        format!("{file_name}.decrypted")
+    };
+    PathBuf::from(output_dir).join(final_name)
 }
 
 #[tauri::command]
@@ -84,11 +144,7 @@ pub fn refresh_notes(state: State<'_, AppState>) -> AppResult<Vec<crate::models:
 
 #[tauri::command]
 pub fn open_note(note_id: String, state: State<'_, AppState>) -> AppResult<OpenNoteResult> {
-    let mut session = state
-        .session
-        .write()
-        .map_err(|_| AppError::External("session lock poisoned".into()))?;
-    let passphrase = session.ensure_unlocked()?.to_string();
+    let passphrase = require_session_passphrase(&state)?;
     let vault = state
         .vault
         .read()
@@ -141,11 +197,7 @@ pub fn resolve_clipboard_note_content(
     if trimmed.contains("-----BEGIN PGP SIGNED MESSAGE-----")
         && trimmed.contains("-----BEGIN PGP SIGNATURE-----")
     {
-        let public_listing = state.crypto.list_keys(false)?;
-        let secret_listing = state.crypto.list_keys(true)?;
-        let identities = state
-            .crypto
-            .parse_key_identities(&public_listing, &secret_listing);
+        let identities = key_identities(&state)?;
         let verified = state.crypto.verify_clear_signed_text(&raw_content)?;
         return Ok(ClipboardNoteContent {
             content: verified.content,
@@ -168,19 +220,11 @@ pub fn resolve_clipboard_note_content(
         });
     }
 
-    let mut session = state
-        .session
-        .write()
-        .map_err(|_| AppError::External("session lock poisoned".into()))?;
-    let passphrase = session.ensure_unlocked()?.to_string();
+    let passphrase = require_session_passphrase(&state)?;
 
     match state.crypto.decrypt_armored_text(&raw_content, &passphrase) {
         Ok(decrypted) => {
-            let public_listing = state.crypto.list_keys(false)?;
-            let secret_listing = state.crypto.list_keys(true)?;
-            let identities = state
-                .crypto
-                .parse_key_identities(&public_listing, &secret_listing);
+            let identities = key_identities(&state)?;
             Ok(ClipboardNoteContent {
                 content: decrypted.content,
                 was_decrypted: true,
@@ -207,19 +251,8 @@ pub fn save_note(
     use_signature: bool,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
-    let mut session = state
-        .session
-        .write()
-        .map_err(|_| AppError::External("session lock poisoned".into()))?;
-    let passphrase = session.ensure_unlocked()?.to_string();
-    let key_manager = state
-        .keys
-        .read()
-        .map_err(|_| AppError::External("key manager lock poisoned".into()))?;
-    let signer = key_manager
-        .selected_private_key()
-        .ok_or(AppError::MissingPrivateKeySelection)?;
-    let recipients = key_manager.selected_recipients();
+    let passphrase = require_session_passphrase(&state)?;
+    let (signer, recipients) = selected_key_context(&state)?;
     let vault = state
         .vault
         .read()
@@ -265,19 +298,8 @@ pub fn preview_pgp_block(
     use_signature: bool,
     state: State<'_, AppState>,
 ) -> AppResult<String> {
-    let mut session = state
-        .session
-        .write()
-        .map_err(|_| AppError::External("session lock poisoned".into()))?;
-    let passphrase = session.ensure_unlocked()?.to_string();
-    let key_manager = state
-        .keys
-        .read()
-        .map_err(|_| AppError::External("key manager lock poisoned".into()))?;
-    let signer = key_manager
-        .selected_private_key()
-        .ok_or(AppError::MissingPrivateKeySelection)?;
-    let recipients = key_manager.selected_recipients();
+    let passphrase = require_session_passphrase(&state)?;
+    let (signer, recipients) = selected_key_context(&state)?;
     if use_signature || recipients.is_empty() {
         state
             .crypto
@@ -294,15 +316,16 @@ pub fn verify_clipboard_signature(
     signature_text: String,
     content: String,
     state: State<'_, AppState>,
-) -> AppResult<crate::models::NoteSignatureStatus> {
-    let public_listing = state.crypto.list_keys(false)?;
-    let secret_listing = state.crypto.list_keys(true)?;
-    let identities = state
-        .crypto
-        .parse_key_identities(&public_listing, &secret_listing);
+) -> AppResult<NoteSignatureStatus> {
+    let identities = key_identities(&state)?;
+    let temp_dir = state.secure_temp.create_scoped_dir("encryptkeeper-verify")?;
+    let signature_path = temp_dir.file_path("clipboard.sig");
+    let content_path = temp_dir.file_path("clipboard.txt");
+    fs::write(&signature_path, signature_text)?;
+    fs::write(&content_path, content)?;
     let signature = state
         .crypto
-        .verify_detached_signature_text(&signature_text, &content)?;
+        .verify_detached_signature(&signature_path, &content_path)?;
     Ok(state.crypto.enrich_signature_status(signature, &identities))
 }
 
@@ -316,11 +339,7 @@ pub fn inspect_note_encryption(
         .read()
         .map_err(|_| AppError::External("vault lock poisoned".into()))?
         .note_path(&note_id)?;
-    let public_listing = state.crypto.list_keys(false)?;
-    let secret_listing = state.crypto.list_keys(true)?;
-    let identities = state
-        .crypto
-        .parse_key_identities(&public_listing, &secret_listing);
+    let identities = key_identities(&state)?;
     let key_manager = state
         .keys
         .read()
@@ -328,32 +347,28 @@ pub fn inspect_note_encryption(
     let selected_private = key_manager.selected_private_key();
     let selected_recipients = key_manager.selected_recipients();
     let recipient_key_ids = state.crypto.inspect_file_recipients(&path)?;
-    let signature = {
-        let mut session = state
-            .session
-            .write()
-            .map_err(|_| AppError::External("session lock poisoned".into()))?;
-        match session.ensure_unlocked() {
-            Ok(passphrase) => match state.crypto.decrypt_file(&path, passphrase) {
-                Ok(decrypted) => state
-                    .crypto
-                    .enrich_signature_status(decrypted.signature, &identities),
-                Err(_) => crate::models::NoteSignatureStatus {
-                    state: "unknown".into(),
-                    signer_key_id: None,
-                    signer_fingerprint: None,
-                    signer_label: None,
-                    summary: "Signature status is unavailable because this note could not be decrypted with the active key.".into(),
-                },
-            },
-            Err(_) => crate::models::NoteSignatureStatus {
+    let signature = match require_session_passphrase(&state) {
+        Ok(passphrase) => match state.crypto.decrypt_file(&path, &passphrase) {
+            Ok(decrypted) => state
+                .crypto
+                .enrich_signature_status(decrypted.signature, &identities),
+            Err(_) => NoteSignatureStatus {
                 state: "unknown".into(),
                 signer_key_id: None,
                 signer_fingerprint: None,
                 signer_label: None,
-                summary: "Unlock the session to verify this note's signature.".into(),
+                summary:
+                    "Signature status is unavailable because this note could not be decrypted with the active key."
+                        .into(),
             },
-        }
+        },
+        Err(_) => NoteSignatureStatus {
+            state: "unknown".into(),
+            signer_key_id: None,
+            signer_fingerprint: None,
+            signer_label: None,
+            summary: "Unlock the session to verify this note's signature.".into(),
+        },
     };
 
     let mut recipients = Vec::new();
@@ -418,19 +433,8 @@ pub fn create_note(
     use_signature: bool,
     state: State<'_, AppState>,
 ) -> AppResult<crate::models::NoteSummary> {
-    let mut session = state
-        .session
-        .write()
-        .map_err(|_| AppError::External("session lock poisoned".into()))?;
-    let passphrase = session.ensure_unlocked()?.to_string();
-    let key_manager = state
-        .keys
-        .read()
-        .map_err(|_| AppError::External("key manager lock poisoned".into()))?;
-    let signer = key_manager
-        .selected_private_key()
-        .ok_or(AppError::MissingPrivateKeySelection)?;
-    let recipients = key_manager.selected_recipients();
+    let passphrase = require_session_passphrase(&state)?;
+    let (signer, recipients) = selected_key_context(&state)?;
     let mut vault = state
         .vault
         .write()
@@ -497,6 +501,103 @@ pub fn delete_note(note_id: String, state: State<'_, AppState>) -> AppResult<()>
 }
 
 #[tauri::command]
+pub fn encrypt_files(
+    input_paths: Vec<String>,
+    output_dir: String,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<FileOperationResult>> {
+    let passphrase = require_session_passphrase(&state)?;
+    let (signer, recipients) = selected_key_context(&state)?;
+    fs::create_dir_all(&output_dir)?;
+
+    let mut results = Vec::new();
+    for input_path in input_paths {
+        let output_path = encrypted_output_path(&output_dir, &input_path);
+        state.crypto.encrypt_file_to_file(
+            &recipients,
+            &signer,
+            &passphrase,
+            PathBuf::from(&input_path).as_path(),
+            output_path.as_path(),
+        )?;
+        results.push(FileOperationResult {
+            input_path: input_path.clone(),
+            output_path: output_path.display().to_string(),
+            operation: "encrypt".into(),
+        });
+    }
+    Ok(results)
+}
+
+#[tauri::command]
+pub fn decrypt_files(
+    input_paths: Vec<String>,
+    output_dir: String,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<FileOperationResult>> {
+    let passphrase = require_session_passphrase(&state)?;
+    fs::create_dir_all(&output_dir)?;
+
+    let mut results = Vec::new();
+    for input_path in input_paths {
+        let output_path = decrypted_output_path(&output_dir, &input_path);
+        state.crypto.decrypt_file_to_path(
+            PathBuf::from(&input_path).as_path(),
+            output_path.as_path(),
+            &passphrase,
+        )?;
+        results.push(FileOperationResult {
+            input_path: input_path.clone(),
+            output_path: output_path.display().to_string(),
+            operation: "decrypt".into(),
+        });
+    }
+    Ok(results)
+}
+
+#[tauri::command]
+pub fn sign_files(
+    input_paths: Vec<String>,
+    output_dir: String,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<FileOperationResult>> {
+    let passphrase = require_session_passphrase(&state)?;
+    let (signer, _) = selected_key_context(&state)?;
+    fs::create_dir_all(&output_dir)?;
+
+    let mut results = Vec::new();
+    for input_path in input_paths {
+        let output_path = detached_signature_output_path(&output_dir, &input_path);
+        state.crypto.create_detached_signature(
+            &signer,
+            &passphrase,
+            PathBuf::from(&input_path).as_path(),
+            output_path.as_path(),
+        )?;
+        results.push(FileOperationResult {
+            input_path: input_path.clone(),
+            output_path: output_path.display().to_string(),
+            operation: "sign".into(),
+        });
+    }
+    Ok(results)
+}
+
+#[tauri::command]
+pub fn verify_file_signature(
+    input_path: String,
+    signature_path: String,
+    state: State<'_, AppState>,
+) -> AppResult<NoteSignatureStatus> {
+    let identities = key_identities(&state)?;
+    let signature = state.crypto.verify_detached_signature(
+        PathBuf::from(signature_path).as_path(),
+        PathBuf::from(input_path).as_path(),
+    )?;
+    Ok(state.crypto.enrich_signature_status(signature, &identities))
+}
+
+#[tauri::command]
 pub fn import_key_from_file(path: String, state: State<'_, AppState>) -> AppResult<()> {
     state.crypto.import_key(PathBuf::from(path).as_path())
 }
@@ -526,6 +627,35 @@ pub fn list_keys(state: State<'_, AppState>) -> AppResult<Vec<KeySummary>> {
         .read()
         .map_err(|_| AppError::External("key manager lock poisoned".into()))?;
     Ok(key_manager.map_keys(keys))
+}
+
+#[tauri::command]
+pub fn get_key_details(
+    fingerprint: String,
+    state: State<'_, AppState>,
+) -> AppResult<KeyDetails> {
+    let public_listing = state.crypto.list_keys(false)?;
+    let secret_listing = state.crypto.list_keys(true)?;
+    let details = state
+        .crypto
+        .key_details(&public_listing, &secret_listing, &fingerprint)
+        .ok_or_else(|| AppError::Validation("Key details could not be loaded.".into()))?;
+    let key_manager = state
+        .keys
+        .read()
+        .map_err(|_| AppError::External("key manager lock poisoned".into()))?;
+    let mut summary = details.summary;
+    summary.is_selected_private = key_manager
+        .selected_private_key()
+        .as_ref()
+        .is_some_and(|value| value == &summary.fingerprint);
+    summary.is_selected_recipient = key_manager
+        .selected_recipients()
+        .contains(&summary.fingerprint);
+    Ok(KeyDetails {
+        summary,
+        subkeys: details.subkeys,
+    })
 }
 
 #[tauri::command]

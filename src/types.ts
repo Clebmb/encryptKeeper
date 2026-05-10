@@ -1,11 +1,34 @@
 export type VaultKind = "none" | "folder" | "archive";
 
 export interface KeySummary {
+  key_id: string;
   fingerprint: string;
   user_ids: string[];
   has_secret: boolean;
+  algorithm: string;
+  bits: number;
+  created_at: number | null;
+  expires_at: number | null;
+  trust: string;
+  capabilities: string[];
   is_selected_private: boolean;
   is_selected_recipient: boolean;
+}
+
+export interface KeySubkey {
+  fingerprint: string;
+  key_id: string;
+  algorithm: string;
+  bits: number;
+  created_at: number | null;
+  expires_at: number | null;
+  capabilities: string[];
+  has_secret: boolean;
+}
+
+export interface KeyDetails {
+  summary: KeySummary;
+  subkeys: KeySubkey[];
 }
 
 export interface NoteSummary {
@@ -65,4 +88,10 @@ export interface NoteSignatureStatus {
   signer_fingerprint: string | null;
   signer_label: string | null;
   summary: string;
+}
+
+export interface FileOperationResult {
+  input_path: string;
+  output_path: string;
+  operation: string;
 }

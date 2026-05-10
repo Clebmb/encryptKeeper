@@ -55,11 +55,43 @@ pub struct NoteSignatureStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeySummary {
+    pub key_id: String,
     pub fingerprint: String,
     pub user_ids: Vec<String>,
     pub has_secret: bool,
+    pub algorithm: String,
+    pub bits: u32,
+    pub created_at: Option<u64>,
+    pub expires_at: Option<u64>,
+    pub trust: String,
+    pub capabilities: Vec<String>,
     pub is_selected_private: bool,
     pub is_selected_recipient: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeySubkey {
+    pub fingerprint: String,
+    pub key_id: String,
+    pub algorithm: String,
+    pub bits: u32,
+    pub created_at: Option<u64>,
+    pub expires_at: Option<u64>,
+    pub capabilities: Vec<String>,
+    pub has_secret: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyDetails {
+    pub summary: KeySummary,
+    pub subkeys: Vec<KeySubkey>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileOperationResult {
+    pub input_path: String,
+    pub output_path: String,
+    pub operation: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,5 +1,7 @@
 import type {
   ClipboardNoteContent,
+  FileOperationResult,
+  KeyDetails,
   KeySummary,
   NoteEncryptionStatus,
   NoteSignatureStatus,
@@ -38,16 +40,30 @@ const defaultStatus: SessionStatus = {
 
 const demoKeys: KeySummary[] = [
   {
+    key_id: "DEMO-PRIVATE-KEY-001",
     fingerprint: "DEMO-PRIVATE-KEY-001",
     user_ids: ["Demo User <demo@encryptkeeper.local>"],
     has_secret: true,
+    algorithm: "RSA",
+    bits: 3072,
+    created_at: 1712707200,
+    expires_at: null,
+    trust: "Ultimate",
+    capabilities: ["Sign", "Encrypt", "Certify"],
     is_selected_private: false,
     is_selected_recipient: false,
   },
   {
+    key_id: "DEMO-PUBLIC-KEY-002",
     fingerprint: "DEMO-PUBLIC-KEY-002",
     user_ids: ["Team Recipient <team@encryptkeeper.local>"],
     has_secret: false,
+    algorithm: "RSA",
+    bits: 3072,
+    created_at: 1712707200,
+    expires_at: null,
+    trust: "Full",
+    capabilities: ["Encrypt"],
     is_selected_private: false,
     is_selected_recipient: false,
   },
@@ -396,6 +412,58 @@ export async function deleteNote(noteId: string): Promise<void> {
   }));
 }
 
+export async function encryptFiles(
+  inputPaths: string[],
+  outputDir: string,
+): Promise<FileOperationResult[]> {
+  if (inputPaths.length === 0 || !outputDir) {
+    throw new Error("Choose files and an output folder.");
+  }
+  return inputPaths.map((inputPath) => ({
+    input_path: inputPath,
+    output_path: `${outputDir}/${lastPathSegment(inputPath)}.gpg`,
+    operation: "encrypt",
+  }));
+}
+
+export async function decryptFiles(
+  inputPaths: string[],
+  outputDir: string,
+): Promise<FileOperationResult[]> {
+  if (inputPaths.length === 0 || !outputDir) {
+    throw new Error("Choose files and an output folder.");
+  }
+  return inputPaths.map((inputPath) => ({
+    input_path: inputPath,
+    output_path: `${outputDir}/${lastPathSegment(inputPath).replace(/\.gpg$/i, "") || `${lastPathSegment(inputPath)}.decrypted`}`,
+    operation: "decrypt",
+  }));
+}
+
+export async function signFiles(
+  inputPaths: string[],
+  outputDir: string,
+): Promise<FileOperationResult[]> {
+  if (inputPaths.length === 0 || !outputDir) {
+    throw new Error("Choose files and an output folder.");
+  }
+  return inputPaths.map((inputPath) => ({
+    input_path: inputPath,
+    output_path: `${outputDir}/${lastPathSegment(inputPath)}.sig`,
+    operation: "sign",
+  }));
+}
+
+export async function verifyFileSignature(
+  inputPath: string,
+  signaturePath: string,
+): Promise<NoteSignatureStatus> {
+  if (!inputPath || !signaturePath) {
+    throw new Error("Choose a file and detached signature.");
+  }
+  return mockSignature(getStore());
+}
+
 export async function importKey(path: string): Promise<void> {
   const pathSegments = path.split(/[/\\]/);
   const name = pathSegments[pathSegments.length - 1] ?? "Imported Key";
@@ -405,9 +473,16 @@ export async function importKey(path: string): Promise<void> {
     keys: [
       ...current.keys,
       {
+        key_id: fingerprint.slice(-16),
         fingerprint,
         user_ids: [`${name} <imported@encryptkeeper.local>`],
         has_secret: true,
+        algorithm: "RSA",
+        bits: 3072,
+        created_at: 1712707200,
+        expires_at: null,
+        trust: "Unknown",
+        capabilities: ["Sign", "Encrypt"],
         is_selected_private: false,
         is_selected_recipient: false,
       },
@@ -427,9 +502,16 @@ export async function importKeyText(armoredText: string): Promise<void> {
     keys: [
       ...current.keys,
       {
+        key_id: fingerprint.slice(-16),
         fingerprint,
         user_ids: [`Clipboard Import <imported@encryptkeeper.local>`],
         has_secret: hasSecret,
+        algorithm: "RSA",
+        bits: 3072,
+        created_at: 1712707200,
+        expires_at: null,
+        trust: hasSecret ? "Ultimate" : "Unknown",
+        capabilities: hasSecret ? ["Sign", "Encrypt"] : ["Encrypt"],
         is_selected_private: false,
         is_selected_recipient: false,
       },
@@ -450,9 +532,16 @@ export async function createKey(name: string, email: string, _passphrase: string
     keys: [
       ...current.keys,
       {
+        key_id: fingerprint.slice(-16),
         fingerprint,
         user_ids: [`${trimmedName} <${trimmedEmail}>`],
         has_secret: true,
+        algorithm: "RSA",
+        bits: 3072,
+        created_at: 1712707200,
+        expires_at: null,
+        trust: "Ultimate",
+        capabilities: ["Sign", "Encrypt", "Certify"],
         is_selected_private: false,
         is_selected_recipient: false,
       },
@@ -462,6 +551,28 @@ export async function createKey(name: string, email: string, _passphrase: string
 
 export async function listKeys(): Promise<KeySummary[]> {
   return getStore().keys;
+}
+
+export async function getKeyDetails(fingerprint: string): Promise<KeyDetails> {
+  const key = getStore().keys.find((entry) => entry.fingerprint === fingerprint);
+  if (!key) {
+    throw new Error("Key not found.");
+  }
+  return {
+    summary: key,
+    subkeys: [
+      {
+        fingerprint: `${fingerprint}-SUBKEY`,
+        key_id: `${fingerprint}-SUB`.slice(-16),
+        algorithm: key.algorithm,
+        bits: key.bits,
+        created_at: key.created_at,
+        expires_at: key.expires_at,
+        capabilities: key.capabilities.includes("Encrypt") ? ["Encrypt"] : ["Sign"],
+        has_secret: key.has_secret,
+      },
+    ],
+  };
 }
 
 export async function getPinnedKeySettings(): Promise<PinnedKeySettings> {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent } from "react";
 import {
   closestCenter,
   DndContext,
@@ -19,10 +19,12 @@ import {
   ArrowDownUp,
   Clipboard,
   Copy,
+  Files,
   FolderPlus,
   FileKey,
   FolderOpen,
   GripVertical,
+  KeyRound,
   Lock,
   NotebookPen,
   Pencil,
@@ -70,11 +72,14 @@ import {
 import {
   createNote,
   createKey,
+  decryptFiles,
   deleteNote,
+  encryptFiles,
   exportPrivateKey,
   exportPublicKey,
   getPinnedKeySettings,
   getBackendMode,
+  getKeyDetails,
   getStatus,
   importKey,
   importKeyText,
@@ -95,13 +100,17 @@ import {
   savePinnedKeySettings,
   selectPrivateKey,
   setRecipients,
+  signFiles,
   unlockSession,
   updatePreferences,
   verifyClipboardSignature,
+  verifyFileSignature,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { normalizeNoteName } from "@/lib/noteName";
 import type {
+  FileOperationResult,
+  KeyDetails,
   KeySummary,
   NoteEncryptionStatus,
   NoteSignatureStatus,
@@ -156,6 +165,20 @@ interface SavedVault {
 interface StoredWindowSize {
   width: number;
   height: number;
+}
+
+type AppTab = "vault" | "keyring";
+
+function formatTimestamp(epoch: number | null) {
+  if (!epoch) {
+    return "Never";
+  }
+  return new Date(epoch * 1000).toLocaleDateString();
+}
+
+function filePathLabel(path: string) {
+  const segments = path.split(/[/\\]/).filter(Boolean);
+  return segments[segments.length - 1] || path;
 }
 
 function formatFingerprint(fingerprint: string) {
@@ -569,9 +592,20 @@ function SortableKeyCard({
 
 export function App() {
   const backendMode = getBackendMode();
+  const [activeTab, setActiveTab] = useState<AppTab>("vault");
   const [status, setStatus] = useState<SessionStatus>(defaultStatus);
   const [keys, setKeys] = useState<KeySummary[]>([]);
+  const [selectedKeyFingerprint, setSelectedKeyFingerprint] = useState<string | null>(null);
+  const [selectedKeyDetails, setSelectedKeyDetails] = useState<KeyDetails | null>(null);
+  const [isLoadingKeyDetails, setIsLoadingKeyDetails] = useState(false);
   const [notes, setNotes] = useState<NoteSummary[]>([]);
+  const [selectedFilePaths, setSelectedFilePaths] = useState<string[]>([]);
+  const [fileOutputDir, setFileOutputDir] = useState("");
+  const [fileOperationResults, setFileOperationResults] = useState<FileOperationResult[]>([]);
+  const [verifyInputPath, setVerifyInputPath] = useState("");
+  const [verifySignaturePath, setVerifySignaturePath] = useState("");
+  const [fileVerificationStatus, setFileVerificationStatus] = useState<NoteSignatureStatus | null>(null);
+  const [isFileDropActive, setIsFileDropActive] = useState(false);
   const [selectedNote, setSelectedNote] = useState<NoteSummary | null>(null);
   const [editorValue, setEditorValue] = useState("");
   const [search, setSearch] = useState("");
@@ -704,6 +738,34 @@ export function App() {
       return [...kept, ...added];
     });
   }, [keys]);
+
+  useEffect(() => {
+    if (keys.length === 0) {
+      setSelectedKeyFingerprint(null);
+      setSelectedKeyDetails(null);
+      return;
+    }
+
+    setSelectedKeyFingerprint((current) => {
+      if (current && keys.some((key) => key.fingerprint === current)) {
+        return current;
+      }
+      return keys[0]?.fingerprint ?? null;
+    });
+  }, [keys]);
+
+  useEffect(() => {
+    if (!selectedKeyFingerprint) {
+      setSelectedKeyDetails(null);
+      return;
+    }
+
+    setIsLoadingKeyDetails(true);
+    void getKeyDetails(selectedKeyFingerprint)
+      .then((details) => setSelectedKeyDetails(details))
+      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
+      .finally(() => setIsLoadingKeyDetails(false));
+  }, [keys, selectedKeyFingerprint]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1043,6 +1105,10 @@ export function App() {
         };
       }),
     [keys, status.selected_recipients],
+  );
+  const selectedKeySummary = useMemo(
+    () => keys.find((key) => key.fingerprint === selectedKeyFingerprint) ?? null,
+    [keys, selectedKeyFingerprint],
   );
 
   async function withBusy<T>(label: string, work: () => Promise<T>) {
@@ -1750,6 +1816,144 @@ export function App() {
     });
   }
 
+  async function pickFiles() {
+    if (backendMode !== "tauri") {
+      const mocked = window.prompt("Mock mode file paths (comma separated)", "report.txt,plan.pdf");
+      if (!mocked) {
+        return;
+      }
+      const parsed = mocked
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+      if (parsed.length > 0) {
+        setSelectedFilePaths((current) => [...new Set([...current, ...parsed])]);
+      }
+      return;
+    }
+
+    const selected = await open({
+      directory: false,
+      multiple: true,
+      title: "Choose Files",
+    });
+    if (!selected) {
+      return;
+    }
+    const paths = Array.isArray(selected) ? selected : [selected];
+    setSelectedFilePaths((current) => [...new Set([...current, ...paths])]);
+  }
+
+  async function pickOutputDirectory() {
+    const selected =
+      backendMode === "tauri"
+        ? await open({ directory: true, multiple: false, title: "Choose Output Folder" })
+        : window.prompt("Mock mode output folder", "exports");
+    if (!selected || Array.isArray(selected)) {
+      return;
+    }
+    setFileOutputDir(selected);
+  }
+
+  async function pickVerifyInputFile() {
+    const selected =
+      backendMode === "tauri"
+        ? await open({ directory: false, multiple: false, title: "Choose File to Verify" })
+        : window.prompt("Mock mode file", "report.txt");
+    if (!selected || Array.isArray(selected)) {
+      return;
+    }
+    setVerifyInputPath(selected);
+  }
+
+  async function pickVerifySignatureFile() {
+    const selected =
+      backendMode === "tauri"
+        ? await open({ directory: false, multiple: false, title: "Choose Signature File" })
+        : window.prompt("Mock mode signature", "report.txt.sig");
+    if (!selected || Array.isArray(selected)) {
+      return;
+    }
+    setVerifySignaturePath(selected);
+  }
+
+  function clearSelectedFiles() {
+    setSelectedFilePaths([]);
+    setFileOperationResults([]);
+    setFileVerificationStatus(null);
+  }
+
+  function collectDroppedPaths(event: ReactDragEvent<HTMLDivElement>) {
+    const droppedPaths = Array.from(event.dataTransfer.files)
+      .map((file) => {
+        const withPath = file as File & { path?: string };
+        return withPath.path ?? "";
+      })
+      .filter(Boolean);
+    return droppedPaths;
+  }
+
+  async function handleFileDrop(event: ReactDragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    setIsFileDropActive(false);
+    const droppedPaths = collectDroppedPaths(event);
+    if (droppedPaths.length === 0) {
+      if (backendMode !== "tauri") {
+        setError("Drag and drop file paths are only available in the desktop app.");
+      }
+      return;
+    }
+    setSelectedFilePaths((current) => [...new Set([...current, ...droppedPaths])]);
+  }
+
+  async function runFileOperation(
+    label: string,
+    work: () => Promise<FileOperationResult[]>,
+  ) {
+    await withBusy(label, async () => {
+      const results = await work();
+      setFileOperationResults(results);
+      if (results.length > 0) {
+        setFileOutputDir(results[0].output_path.replace(/[\\/][^\\/]+$/, ""));
+      }
+    });
+  }
+
+  async function handleEncryptFiles() {
+    if (selectedFilePaths.length === 0 || !fileOutputDir) {
+      setError("Choose files and an output folder first.");
+      return;
+    }
+    await runFileOperation("Encrypting files...", () => encryptFiles(selectedFilePaths, fileOutputDir));
+  }
+
+  async function handleDecryptFiles() {
+    if (selectedFilePaths.length === 0 || !fileOutputDir) {
+      setError("Choose files and an output folder first.");
+      return;
+    }
+    await runFileOperation("Decrypting files...", () => decryptFiles(selectedFilePaths, fileOutputDir));
+  }
+
+  async function handleSignFiles() {
+    if (selectedFilePaths.length === 0 || !fileOutputDir) {
+      setError("Choose files and an output folder first.");
+      return;
+    }
+    await runFileOperation("Signing files...", () => signFiles(selectedFilePaths, fileOutputDir));
+  }
+
+  async function handleVerifyFileSignature() {
+    if (!verifyInputPath || !verifySignaturePath) {
+      setError("Choose a file and signature first.");
+      return;
+    }
+    await withBusy("Verifying signature...", async () => {
+      const next = await verifyFileSignature(verifyInputPath, verifySignaturePath);
+      setFileVerificationStatus(next);
+    });
+  }
+
   async function handlePreferenceChange(
     next: Partial<Pick<SessionStatus, "recursive_scan" | "inactivity_timeout_secs" | "auto_save">>,
   ) {
@@ -2176,6 +2380,25 @@ export function App() {
             </CardContent>
           </Card>
 
+          <div className="flex items-center gap-2 rounded-xl border border-border/70 bg-card/60 p-1 backdrop-blur-xl">
+            <Button
+              variant={activeTab === "vault" ? "secondary" : "ghost"}
+              className="flex-1 justify-center"
+              onClick={() => setActiveTab("vault")}
+            >
+              <NotebookPen className="h-4 w-4" />
+              Vault
+            </Button>
+            <Button
+              variant={activeTab === "keyring" ? "secondary" : "ghost"}
+              className="flex-1 justify-center"
+              onClick={() => setActiveTab("keyring")}
+            >
+              <KeyRound className="h-4 w-4" />
+              Keyring
+            </Button>
+          </div>
+
           <div className="space-y-2">
             {status.session_unlocked ? (
               <Card className="border-amber-500/20 bg-amber-500/8">
@@ -2199,6 +2422,7 @@ export function App() {
             ) : null}
           </div>
 
+          {activeTab === "vault" ? (
           <div className="grid gap-4 md:grid-cols-[280px_minmax(0,1fr)]">
             <aside className="space-y-4">
               <Card className="border-white/10 bg-card/75">
@@ -2282,6 +2506,117 @@ export function App() {
                       )}
                     </div>
                   </ScrollArea>
+                </CardContent>
+              </Card>
+
+              <Card className="border-white/10 bg-card/75">
+                <CardHeader className="space-y-3 pb-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <CardTitle className="text-base">Files</CardTitle>
+                    <Files className="h-4 w-4 text-muted-foreground" />
+                  </div>
+                  <CardDescription>
+                    Encrypt, decrypt, sign, and verify files without leaving the vault.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3 pt-0">
+                  <div
+                    className={cn(
+                      "rounded-lg border border-dashed p-3 text-sm transition-colors",
+                      isFileDropActive
+                        ? "border-primary/50 bg-primary/10"
+                        : "border-border/70 bg-background/40 text-muted-foreground",
+                    )}
+                    onDragOver={(event) => {
+                      event.preventDefault();
+                      setIsFileDropActive(true);
+                    }}
+                    onDragLeave={() => setIsFileDropActive(false)}
+                    onDrop={(event) => void handleFileDrop(event)}
+                  >
+                    Drop files here or choose them below.
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <Button size="sm" variant="secondary" onClick={() => void pickFiles()}>
+                      Choose Files
+                    </Button>
+                    <Button size="sm" variant="secondary" onClick={() => void pickOutputDirectory()}>
+                      Output Folder
+                    </Button>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    <Button size="sm" onClick={() => void handleEncryptFiles()} disabled={selectedFilePaths.length === 0}>
+                      Encrypt
+                    </Button>
+                    <Button size="sm" variant="secondary" onClick={() => void handleDecryptFiles()} disabled={selectedFilePaths.length === 0}>
+                      Decrypt
+                    </Button>
+                    <Button size="sm" variant="secondary" onClick={() => void handleSignFiles()} disabled={selectedFilePaths.length === 0}>
+                      Sign
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={clearSelectedFiles} disabled={selectedFilePaths.length === 0}>
+                      Clear
+                    </Button>
+                  </div>
+
+                  <div className="rounded-lg border border-border/70 bg-background/40 px-3 py-2 text-xs text-muted-foreground">
+                    Output: <span className="break-all text-foreground">{fileOutputDir || "No folder selected"}</span>
+                  </div>
+
+                  <ScrollArea className="h-28 pr-3">
+                    <div className="space-y-2">
+                      {selectedFilePaths.length === 0 ? (
+                        <div className="rounded-lg border border-dashed border-border p-3 text-sm text-muted-foreground">
+                          No files queued.
+                        </div>
+                      ) : (
+                        selectedFilePaths.map((path) => (
+                          <div key={path} className="rounded-lg border border-border/70 bg-background/40 px-3 py-2 text-sm">
+                            <div className="truncate font-medium">{filePathLabel(path)}</div>
+                            <div className="truncate text-xs text-muted-foreground">{path}</div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </ScrollArea>
+
+                  <div className="space-y-2 rounded-lg border border-border/70 bg-background/40 p-3">
+                    <div className="text-sm font-medium">Verify Detached Signature</div>
+                    <Button size="sm" variant="secondary" onClick={() => void pickVerifyInputFile()}>
+                      Choose File
+                    </Button>
+                    <div className="truncate text-xs text-muted-foreground">{verifyInputPath || "No file selected"}</div>
+                    <Button size="sm" variant="secondary" onClick={() => void pickVerifySignatureFile()}>
+                      Choose Signature
+                    </Button>
+                    <div className="truncate text-xs text-muted-foreground">{verifySignaturePath || "No signature selected"}</div>
+                    <Button size="sm" onClick={() => void handleVerifyFileSignature()} disabled={!verifyInputPath || !verifySignaturePath}>
+                      Verify
+                    </Button>
+                    {fileVerificationStatus ? (
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                        <Badge variant={signatureBadgeVariant(fileVerificationStatus.state)}>
+                          {fileVerificationStatus.state}
+                        </Badge>
+                        <span>{fileVerificationStatus.summary}</span>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  {fileOperationResults.length > 0 ? (
+                    <div className="space-y-2 rounded-lg border border-border/70 bg-background/40 p-3">
+                      <div className="text-sm font-medium">Recent File Outputs</div>
+                      {fileOperationResults.map((result) => (
+                        <div key={`${result.input_path}-${result.output_path}`} className="rounded-lg border border-border/70 bg-background/60 px-3 py-2 text-xs text-muted-foreground">
+                          <div className="font-medium text-foreground">{result.operation}</div>
+                          <div className="truncate">{result.input_path}</div>
+                          <div className="truncate">{result.output_path}</div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                 </CardContent>
               </Card>
 
@@ -2524,6 +2859,231 @@ export function App() {
               </CardContent>
             </Card>
           </div>
+          ) : (
+            <div className="grid gap-4 md:grid-cols-[320px_minmax(0,1fr)]">
+              <aside className="space-y-4">
+                <Card className="border-white/10 bg-card/75">
+                  <CardHeader className="space-y-3 pb-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <CardTitle className="text-base">Keyring</CardTitle>
+                      <div className="flex items-center gap-2">
+                        <Button variant="ghost" size="icon" onClick={() => void refreshKeys()}>
+                          <RefreshCcw className="h-4 w-4" />
+                        </Button>
+                        <label className="flex items-center gap-2 rounded-md border border-border/70 px-2 py-1 text-xs text-muted-foreground">
+                          <input
+                            type="checkbox"
+                            checked={useSignature}
+                            onChange={(event) => void handleUseSignatureToggle(event.target.checked)}
+                          />
+                          <span>Sign only</span>
+                        </label>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Button size="sm" variant="secondary" onClick={() => setIsCreateKeyOpen(true)}>
+                        <Plus className="h-4 w-4" />
+                        Create
+                      </Button>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button size="sm" variant="secondary">
+                            <FileKey className="h-4 w-4" />
+                            Import
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" side="bottom" className="w-36">
+                          <DropdownMenuItem onClick={() => void handleImportKey()}>File</DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => void handleImportClipboard()}>
+                            Clipboard
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
+                  </CardHeader>
+                  <CardContent className="pt-0">
+                    <ScrollArea className="h-[620px] pr-3">
+                      <div className="space-y-2">
+                        {orderedKeys.map((key) => (
+                          <button
+                            key={key.fingerprint}
+                            className={cn(
+                              "w-full rounded-lg border px-3 py-3 text-left transition-colors",
+                              selectedKeyFingerprint === key.fingerprint
+                                ? "border-primary/40 bg-primary/10"
+                                : "border-border/70 bg-background/40 hover:bg-accent",
+                            )}
+                            onClick={() => setSelectedKeyFingerprint(key.fingerprint)}
+                          >
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="truncate text-sm font-medium">{key.user_ids[0] ?? "Unnamed key"}</div>
+                                <div className="truncate text-xs text-muted-foreground">
+                                  {key.algorithm} {key.bits ? `• ${key.bits}-bit` : ""}
+                                </div>
+                              </div>
+                              <Badge variant={key.has_secret ? "default" : "secondary"}>
+                                {key.has_secret ? "Secret" : "Public"}
+                              </Badge>
+                            </div>
+                            <div className="mt-2 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                              <code>{formatFingerprint(key.fingerprint)}</code>
+                              <span>{key.trust}</span>
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    </ScrollArea>
+                  </CardContent>
+                </Card>
+              </aside>
+
+              <div className="space-y-4">
+                <Card className="border-white/10 bg-card/75">
+                  <CardHeader className="space-y-3 pb-3">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <CardTitle className="text-base">
+                          {selectedKeyDetails?.summary.user_ids[0] ?? selectedKeySummary?.user_ids[0] ?? "Key Details"}
+                        </CardTitle>
+                        <CardDescription>
+                          {selectedKeyDetails?.summary.algorithm ?? selectedKeySummary?.algorithm ?? "OpenPGP"}{" "}
+                          {selectedKeyDetails?.summary.bits ?? selectedKeySummary?.bits ?? 0}-bit
+                        </CardDescription>
+                      </div>
+                      {selectedKeySummary ? (
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => void handlePrivateKeySelection(selectedKeySummary.fingerprint)}
+                            disabled={!selectedKeySummary.has_secret}
+                          >
+                            Use to decrypt
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() =>
+                              void handleRecipientSelection(
+                                selectedKeySummary.fingerprint,
+                                !selectedKeySummary.is_selected_recipient,
+                              )
+                            }
+                          >
+                            {selectedKeySummary.is_selected_recipient ? "Remove recipient" : "Add recipient"}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => void handleExportPublic(selectedKeySummary)}
+                          >
+                            Export Public
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => openExportDialog(selectedKeySummary, "private")}
+                            disabled={!selectedKeySummary.has_secret}
+                          >
+                            Export Secret
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => void handleRemoveKey(selectedKeySummary)}
+                          >
+                            Remove
+                          </Button>
+                        </div>
+                      ) : null}
+                    </div>
+                  </CardHeader>
+                  <CardContent className="space-y-4 pt-0">
+                    {isLoadingKeyDetails ? (
+                      <div className="rounded-lg border border-border/70 bg-background/40 px-3 py-6 text-sm text-muted-foreground">
+                        Loading key details...
+                      </div>
+                    ) : selectedKeyDetails ? (
+                      <>
+                        <div className="grid gap-3 md:grid-cols-2">
+                          <div className="rounded-lg border border-border/70 bg-background/40 p-3">
+                            <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">Identity</div>
+                            <div className="space-y-2 text-sm">
+                              {selectedKeyDetails.summary.user_ids.map((userId) => (
+                                <div key={userId} className="rounded-md bg-background/60 px-3 py-2">
+                                  {userId}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                          <div className="rounded-lg border border-border/70 bg-background/40 p-3">
+                            <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">Status</div>
+                            <div className="grid gap-2 text-sm text-muted-foreground">
+                              <div>Trust: <span className="text-foreground">{selectedKeyDetails.summary.trust}</span></div>
+                              <div>Created: <span className="text-foreground">{formatTimestamp(selectedKeyDetails.summary.created_at)}</span></div>
+                              <div>Expires: <span className="text-foreground">{formatTimestamp(selectedKeyDetails.summary.expires_at)}</span></div>
+                              <div>Key ID: <code className="text-foreground">{selectedKeyDetails.summary.key_id}</code></div>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="rounded-lg border border-border/70 bg-background/40 p-3">
+                          <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">Capabilities</div>
+                          <div className="flex flex-wrap gap-2">
+                            {selectedKeyDetails.summary.capabilities.length > 0 ? (
+                              selectedKeyDetails.summary.capabilities.map((capability) => (
+                                <Badge key={capability} variant="outline">{capability}</Badge>
+                              ))
+                            ) : (
+                              <Badge variant="secondary">No capabilities reported</Badge>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="rounded-lg border border-border/70 bg-background/40 p-3">
+                          <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">Fingerprint</div>
+                          <code className="block break-all text-sm text-foreground">
+                            {selectedKeyDetails.summary.fingerprint}
+                          </code>
+                        </div>
+
+                        <div className="rounded-lg border border-border/70 bg-background/40 p-3">
+                          <div className="mb-3 text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">Subkeys</div>
+                          <div className="space-y-2">
+                            {selectedKeyDetails.subkeys.map((subkey) => (
+                              <div key={subkey.fingerprint} className="rounded-lg border border-border/70 bg-background/60 p-3">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <div className="text-sm font-medium">{subkey.algorithm} {subkey.bits ? `• ${subkey.bits}-bit` : ""}</div>
+                                  <Badge variant={subkey.has_secret ? "default" : "secondary"}>
+                                    {subkey.has_secret ? "Secret available" : "Public only"}
+                                  </Badge>
+                                </div>
+                                <div className="mt-2 text-xs text-muted-foreground">
+                                  <code>{subkey.fingerprint}</code>
+                                </div>
+                                <div className="mt-2 flex flex-wrap gap-2">
+                                  {subkey.capabilities.map((capability) => (
+                                    <Badge key={`${subkey.fingerprint}-${capability}`} variant="outline">
+                                      {capability}
+                                    </Badge>
+                                  ))}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="rounded-lg border border-dashed border-border p-6 text-sm text-muted-foreground">
+                        Select a key to inspect the keyring.
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

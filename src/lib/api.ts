@@ -1,5 +1,7 @@
 import type {
   ClipboardNoteContent,
+  FileOperationResult,
+  KeyDetails,
   KeySummary,
   NoteEncryptionStatus,
   NoteSignatureStatus,
@@ -83,6 +85,26 @@ async function invokeOrMock<T>(command: string, args?: Record<string, unknown>):
         ) as Promise<T>;
       case "delete_note":
         return mockBackend.deleteNote(String(args?.noteId ?? args?.note_id ?? "")) as Promise<T>;
+      case "encrypt_files":
+        return mockBackend.encryptFiles(
+          (args?.inputPaths as string[] | undefined) ?? [],
+          String(args?.outputDir ?? args?.output_dir ?? ""),
+        ) as Promise<T>;
+      case "decrypt_files":
+        return mockBackend.decryptFiles(
+          (args?.inputPaths as string[] | undefined) ?? [],
+          String(args?.outputDir ?? args?.output_dir ?? ""),
+        ) as Promise<T>;
+      case "sign_files":
+        return mockBackend.signFiles(
+          (args?.inputPaths as string[] | undefined) ?? [],
+          String(args?.outputDir ?? args?.output_dir ?? ""),
+        ) as Promise<T>;
+      case "verify_file_signature":
+        return mockBackend.verifyFileSignature(
+          String(args?.inputPath ?? args?.input_path ?? ""),
+          String(args?.signaturePath ?? args?.signature_path ?? ""),
+        ) as Promise<T>;
       case "import_key_from_file":
         return mockBackend.importKey(String(args?.path ?? "")) as Promise<T>;
       case "import_key_from_text":
@@ -95,6 +117,8 @@ async function invokeOrMock<T>(command: string, args?: Record<string, unknown>):
         ) as Promise<T>;
       case "list_keys":
         return mockBackend.listKeys() as Promise<T>;
+      case "get_key_details":
+        return mockBackend.getKeyDetails(String(args?.fingerprint ?? "")) as Promise<T>;
       case "get_pinned_key_settings":
         return mockBackend.getPinnedKeySettings() as Promise<T>;
       case "save_pinned_key_settings":
@@ -222,6 +246,34 @@ export async function deleteNote(noteId: string): Promise<void> {
   return invokeOrMock("delete_note", { noteId });
 }
 
+export async function encryptFiles(
+  inputPaths: string[],
+  outputDir: string,
+): Promise<FileOperationResult[]> {
+  return invokeOrMock("encrypt_files", { inputPaths, outputDir });
+}
+
+export async function decryptFiles(
+  inputPaths: string[],
+  outputDir: string,
+): Promise<FileOperationResult[]> {
+  return invokeOrMock("decrypt_files", { inputPaths, outputDir });
+}
+
+export async function signFiles(
+  inputPaths: string[],
+  outputDir: string,
+): Promise<FileOperationResult[]> {
+  return invokeOrMock("sign_files", { inputPaths, outputDir });
+}
+
+export async function verifyFileSignature(
+  inputPath: string,
+  signaturePath: string,
+): Promise<NoteSignatureStatus> {
+  return invokeOrMock("verify_file_signature", { inputPath, signaturePath });
+}
+
 export async function importKey(path: string): Promise<void> {
   return invokeOrMock("import_key_from_file", { path });
 }
@@ -236,6 +288,10 @@ export async function createKey(name: string, email: string, passphrase: string)
 
 export async function listKeys(): Promise<KeySummary[]> {
   return invokeOrMock("list_keys");
+}
+
+export async function getKeyDetails(fingerprint: string): Promise<KeyDetails> {
+  return invokeOrMock("get_key_details", { fingerprint });
 }
 
 export async function getPinnedKeySettings(): Promise<PinnedKeySettings> {
