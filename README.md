@@ -1,117 +1,115 @@
-<img width="128" height="128" alt="icon" src="https://github.com/user-attachments/assets/60a23219-fba7-4fca-9ad7-43f1245b8a2b" />
-
 # encryptKeeper
-Desktop app for managing encrypted `.gpg` text notes in a folder vault.
 
-<img width="812" height="424" alt="encryptkeeper_xEkANPyxde" src="https://github.com/user-attachments/assets/b630c18b-1a72-478b-be7a-3bcf17c9bdba" />
+Desktop OpenPGP and S/MIME workspace built with Tauri, React, and GnuPG.
 
-<img width="812" height="424" alt="encryptkeeper_K9GNQNV9N5" src="https://github.com/user-attachments/assets/a68e9de5-ca68-4613-b139-aa765e35be8c" />
+encryptKeeper is no longer just an encrypted note editor. The current app is organized around three working areas:
 
+- `Note Vault` for encrypted notes in folder or archive vaults
+- `Files` for OpenPGP and S/MIME file operations
+- `Keyring` for OpenPGP keys, X.509 certificates, trust, and hardware token workflows
 
-## Overview
+## Highlights
 
-encryptKeeper is a Tauri desktop app for writing, opening, and managing OpenPGP-encrypted note files on Windows. It uses your local GnuPG installation for key import, encryption, decryption, key creation, passphrase verification, and recipient inspection.
+- OpenPGP note vaults with create, open, save, rename, delete, search, recipient inspection, signature verification, and clipboard-driven note import
+- Folder vaults and ZIP archive vaults with saved paths, pinned reopen behavior, and archive round-trip editing
+- Arbitrary file and folder encrypt, decrypt, sign, and verify workflows with detached signatures and preserved relative output structure for batch folder jobs
+- OpenPGP key management with import, export, lookup, keyserver search, publish, refresh, trust changes, expiry updates, passphrase rotation, certification, revocation export, and subkey creation
+- X.509 / S-MIME certificate inventory with create, import, export, PKCS#12, PKCS#8, passphrase change, validation, trust-root management, CRL import, and S/MIME file operations
+- Hardware token support for status, PIN change, service restart, fetch key, sync stubs, on-card key generation, moving local key material to card, and factory reset
+- Persistent recent activity feed with collapsible display and a settings toggle
 
-The app is built around folder-based vaults containing encrypted note files, with quick access to saved vault paths, session-based unlocking, clipboard-aware workflows, and compact key management.
+## Main Areas
 
-## Current Features
+### Note Vault
 
-### Vaults and note management
+- Open folder vaults and ZIP archive vaults
+- Save, pin, reopen, and manage vault entries
+- Create, open, edit, rename, save, refresh, and delete encrypted notes
+- Encrypt notes to selected recipients or save signed / symmetric notes
+- Inspect note recipients and verify note signatures on open
+- Import notes from clipboard text, PGP blocks, and detached signature flows
 
-- Open a folder vault and scan it for `.gpg` note files
-- Save vault paths for quick reopening from the header
-- Pin a vault so it opens automatically when the app starts
-- Edit or delete saved vault entries directly from the vault menu
-- View the current vault path directly in the main header
-- Create, open, edit, rename, save, and delete encrypted notes
-- Refresh notes from disk when the vault contents change externally
-- Search notes by path/name inside the current vault
+### Files
 
-### Encryption and decryption
+- Encrypt, decrypt, sign, clear, and verify arbitrary files
+- Verify detached signatures
+- Queue files and folders together
+- Preserve folder structure when processing batch folder jobs
+- Choose output targets explicitly
+- Switch between `OpenPGP` and `S-MIME` file workflows
+- Reuse the selected key and recipient state from the integrated sidebar
 
-- Encrypt notes to one or more selected recipient keys
-- Sign newly saved notes and generated PGP blocks with the selected private key
-- Save and preview clear-signed PGP signature notes when `Use Signature` is enabled or no recipients are selected
-- Create and save password-encrypted notes using GnuPG symmetric encryption
-- Decrypt notes with the currently selected private key after unlock
-- Open password-encrypted notes by entering the note password when prompted
-- Inspect note recipients and compare them with the current selected recipient set
-- Verify note signatures on open and show good, bad, missing, or unavailable signature status
-- Re-encrypt the currently open note when recipient selections change
-- Preview the generated armored PGP message block for the current note
-- Copy the generated PGP block directly from the preview panel
+### Keyring
 
-### Clipboard workflows
+- Browse OpenPGP keys and X.509 certificates in one workspace
+- Inspect identity, fingerprints, usage, trust, subkeys, certifications, and validation state
+- Import from files, pasted text, clipboard, WKD lookup, and public keyserver search
+- Export public, secret, combined, PKCS#12, and PKCS#8 material where supported
+- Update OpenPGP expiry, ownertrust, passphrases, certifications, revocation outputs, and subkeys
+- Manage X.509 trust roots, validation chains, trust snapshots, and CRL imports
+- Review recent import summaries and duplicate handling
 
-- Create a new note from the current clipboard contents
-- Automatically decrypt a clipboard PGP message into a new note when it matches the active unlocked key
-- Verify signatures on decrypted clipboard PGP messages and show the clipboard signer status after import
-- Create notes from pasted clear-signed PGP messages
-- Verify pasted detached PGP signatures against the currently open note
-- Paste plain text from the clipboard directly into a newly created note
-- Enable `Use Clipboard` so `Ctrl+V` outside active text editing can:
-  - detect decryptable PGP message blocks and create a note from them
-  - detect OpenPGP key blocks and offer to import them
-- Import OpenPGP keys from the clipboard
+## OpenPGP Features
 
-### Key management
+- Local key generation
+- Recipient selection for note and file encryption
+- Detached and inline signature workflows
+- Public keyserver publish, refresh, and full sync
+- WKD and auto-discovery lookup
+- Revocation certificate export
+- Ownertrust import and export
+- Passphrase rotation for existing secret keys
+- Certification visibility for signed user IDs
 
-- Import public or private OpenPGP keys from files
-- Import OpenPGP keys from clipboard text
-- Create new OpenPGP keypairs in the local GnuPG keyring
-- Export public keys
-- Export private keys
-- Export public and private keys together
-- Remove keys from the local keyring
-- Reorder keys in the UI
-- Choose a private key to use for decryption
-- Choose recipient keys used for note encryption
-- Pin per-key decrypt and recipient settings so they persist across app restarts
-- Hover long key identities to reveal the full name/email and scroll truncated text
+## X.509 / S-MIME Features
 
-### Session and app behavior
+- Self-signed X.509 certificate creation
+- Certificate import from file and pasted certificate text
+- Certificate export plus private material export through PKCS#12 and PKCS#8
+- S/MIME encrypt, decrypt, sign, and detached-verify in the `Files` tab
+- Validated chain view with compact validation summary
+- CRL import
+- Trust-root mark and unmark support through the local trust list
+- X.509 passphrase changes for certificates with private material
 
-- Unlock and lock the app without leaving plaintext in the editor after lock
-- Press `Enter` in the passphrase field to unlock
-- Optional auto-save while unlocked
-- Configurable auto-lock timer, including fully disabled auto-lock
-- Remember the last resized window size between launches
-- Open with a compact default window height
+## Hardware Token Features
 
-## Preferences
+- Smartcard and token status panel in `Keyring`
+- Restart smartcard service
+- Change token PIN
+- Fetch linked public key from card metadata
+- Sync local shadow stubs
+- Generate on-card key material by slot and algorithm
+- Store local OpenPGP key material onto the card
+- Factory reset with explicit confirmation
 
-The app currently includes the following user-facing preferences:
+## Preferences And Activity
 
-- `Recursive scan`
-- `Use Clipboard`
-- `Auto-save`
-- `Hide Note Names`
-- `Auto-Show Recipients`
-- `Auto-Show PGP Block`
-- Auto-lock timeout on/off with configurable minutes
+- Collapsible `Recent Activity` feed
+- `Show Recent History` setting to hide the panel entirely
+- Auto-lock timeout control
+- Auto-save
+- Clipboard integration
+- Recursive scan
+- Note-name hiding
+- Auto-show recipient and PGP block preferences
 
-## Windows Releases
+## Requirements
 
-If you just want to use the app, download a built Windows release from the repository Releases page.
-
-## Installation
-
-If you want to run from source, install:
+To run from source, install:
 
 - Node.js
 - Rust
-- GnuPG
+- GnuPG with `gpg`, `gpgsm`, and smartcard support where needed
 - Tauri prerequisites for Windows
 
-Then install dependencies:
+Install dependencies:
 
 ```powershell
 npm install
 ```
 
-## Environment Check
-
-Verify the required tools are available:
+Verify the environment:
 
 ```powershell
 npm run check:env
@@ -119,29 +117,36 @@ npm run check:env
 
 ## Development
 
-Run the desktop app in development mode:
+Run the desktop app:
 
 ```powershell
 npm run tauri:dev
 ```
 
-## Build
+Run the frontend tests:
 
-Create a production build:
+```powershell
+npm test
+```
+
+Run the Rust tests:
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+Build the frontend bundle:
+
+```powershell
+npm run build
+```
+
+Create a production desktop build:
 
 ```powershell
 npm run tauri:build
 ```
 
-## Other Scripts
+## Release Notes
 
-```powershell
-npm run build
-npm run test
-```
-
-## Notes
-
-- This is a desktop project for PC use.
-- Imported keys are handled through your local GnuPG keyring, not stored in the repository.
-- Browser mock mode exists for UI development, but the real app flow is the desktop Tauri build.
+See [CHANGELOG.md](CHANGELOG.md) for the `0.5.5` release summary.

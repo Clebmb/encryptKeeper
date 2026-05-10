@@ -197,6 +197,7 @@ const HIDE_NOTE_NAMES_ON_LOCK_STORAGE_KEY = "encryptkeeper.hide-note-names-on-lo
 const USE_CLIPBOARD_STORAGE_KEY = "encryptkeeper.use-clipboard";
 const AUTO_SHOW_RECIPIENTS_STORAGE_KEY = "encryptkeeper.auto-show-recipients";
 const AUTO_SHOW_PGP_BLOCK_STORAGE_KEY = "encryptkeeper.auto-show-pgp-block";
+const SHOW_RECENT_HISTORY_STORAGE_KEY = "encryptkeeper.show-recent-history";
 const SAVED_VAULTS_STORAGE_KEY = "encryptkeeper.saved-vaults";
 const PINNED_VAULT_PATH_STORAGE_KEY = "encryptkeeper.pinned-vault-path";
 const WINDOW_SIZE_STORAGE_KEY = "encryptkeeper.window-size";
@@ -954,6 +955,10 @@ export function App() {
   const [autoShowPgpBlock, setAutoShowPgpBlock] = useState(() =>
     loadStoredBoolean(AUTO_SHOW_PGP_BLOCK_STORAGE_KEY, false),
   );
+  const [showRecentHistory, setShowRecentHistory] = useState(() =>
+    loadStoredBoolean(SHOW_RECENT_HISTORY_STORAGE_KEY, true),
+  );
+  const [isRecentHistoryOpen, setIsRecentHistoryOpen] = useState(false);
   const [useSignature, setUseSignature] = useState(false);
   const [isCreateKeyOpen, setIsCreateKeyOpen] = useState(false);
   const [newKeyName, setNewKeyName] = useState("");
@@ -1248,6 +1253,26 @@ export function App() {
       autoShowPgpBlock ? "true" : "false",
     );
   }, [autoShowPgpBlock]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    try {
+      window.localStorage.setItem(
+        SHOW_RECENT_HISTORY_STORAGE_KEY,
+        showRecentHistory ? "true" : "false",
+      );
+    } catch {
+      // Ignore storage errors and keep the in-memory preference.
+    }
+  }, [showRecentHistory]);
+
+  useEffect(() => {
+    if (!showRecentHistory) {
+      setIsRecentHistoryOpen(false);
+    }
+  }, [showRecentHistory]);
 
   useEffect(() => {
     const availableFingerprints = new Set(keys.map((key) => key.fingerprint));
@@ -3638,13 +3663,17 @@ export function App() {
           </Dialog>
 
           <Dialog open={isKeyToolsOpen} onOpenChange={setIsKeyToolsOpen}>
-            <DialogContent>
+            <DialogContent className="max-h-[min(90vh,56rem)] overflow-hidden p-0 sm:max-w-2xl">
+              <div className="flex max-h-[min(90vh,56rem)] flex-col">
+              <div className="px-6 pt-6">
               <DialogHeader>
                 <DialogTitle>Keyring Tools</DialogTitle>
                 <DialogDescription>
                   Update trust and expiry, add a subkey, manage trust snapshots, certify the selected key, or export a revocation certificate.
                 </DialogDescription>
               </DialogHeader>
+              </div>
+              <div className="flex-1 overflow-y-auto px-6 py-4">
               <div className="space-y-4">
                 <div className="grid gap-2">
                   <label className="text-sm font-medium">Expiration</label>
@@ -3788,11 +3817,13 @@ export function App() {
                   </Button>
                 </div>
               </div>
-              <DialogFooter>
+              </div>
+              <DialogFooter className="border-t px-6 py-4">
                 <Button variant="ghost" onClick={() => setIsKeyToolsOpen(false)}>
                   Close
                 </Button>
               </DialogFooter>
+              </div>
             </DialogContent>
           </Dialog>
 
@@ -3942,6 +3973,16 @@ export function App() {
                         <Switch
                           checked={autoShowPgpBlock}
                           onCheckedChange={setAutoShowPgpBlock}
+                        />
+                      </div>
+                      <div className="flex items-center justify-between gap-3 px-2 py-2">
+                        <div>
+                          <div className="text-sm font-medium">Show Recent History</div>
+                          <div className="text-xs text-muted-foreground">Display the recent activity panel</div>
+                        </div>
+                        <Switch
+                          checked={showRecentHistory}
+                          onCheckedChange={setShowRecentHistory}
                         />
                       </div>
                     </DropdownMenuContent>
@@ -5491,20 +5532,31 @@ export function App() {
             </div>
           )}
 
+          {showRecentHistory ? (
           <Card className="border-white/10 bg-card/75">
             <CardHeader className="space-y-1 pb-3">
               <div className="flex items-center justify-between gap-2">
                 <CardTitle className="text-base">Recent Activity</CardTitle>
-                {activityLog.length > 0 ? (
-                  <Button size="sm" variant="ghost" onClick={() => setActivityLog([])}>
-                    Clear
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setIsRecentHistoryOpen((current) => !current)}
+                  >
+                    {isRecentHistoryOpen ? "Hide Recent History" : "Show Recent History"}
                   </Button>
-                ) : null}
+                  {isRecentHistoryOpen && activityLog.length > 0 ? (
+                    <Button size="sm" variant="ghost" onClick={() => setActivityLog([])}>
+                      Clear
+                    </Button>
+                  ) : null}
+                </div>
               </div>
               <CardDescription>
                 Persistent history for note, file, and key actions on this device.
               </CardDescription>
             </CardHeader>
+            {isRecentHistoryOpen ? (
             <CardContent className="pt-0">
               <ScrollArea className="max-h-[220px] pr-3">
                 <div className="space-y-2">
@@ -5530,7 +5582,9 @@ export function App() {
                 </div>
               </ScrollArea>
             </CardContent>
+            ) : null}
           </Card>
+          ) : null}
         </div>
       </div>
     </div>

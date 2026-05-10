@@ -1,7 +1,7 @@
 [package]
 name = "encryptkeeper"
-version = "0.1.4"
-description = "Secure desktop note vault for .gpg text files"
+version = "0.5.5"
+description = "OpenPGP and S/MIME desktop workspace for notes, files, certificates, and hardware tokens"
 authors = ["Codex"]
 edition = "2021"
 
