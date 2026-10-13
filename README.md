@@ -1,127 +1,152 @@
-# encryptKeeper
+<p align="center">
+  <img src="docs/images/encryptkeeper-logo.png" alt="encryptKeeper logo" width="640">
+</p>
 
-Desktop OpenPGP and S/MIME workspace built with Tauri, React, and GnuPG.
+<h3 align="center"><b>encryptKeeper</b></h3>
 
-encryptKeeper is no longer just an encrypted note editor. The current app is organized around three working areas:
+<p align="center">Desktop app for managing encrypted .gpg text notes in a folder vault.</p>
 
-- `Note Vault` for encrypted notes in folder or archive vaults
-- `Files` for OpenPGP and S/MIME file operations
-- `Keyring` for OpenPGP keys, X.509 certificates, trust, and hardware token workflows
+<p align="center">
+  <img src="docs/images/encryptkeeper-screenshot.png" alt="encryptKeeper default view" width="800">
+</p>
 
-## Highlights
+---
 
-- OpenPGP note vaults with create, open, save, rename, delete, search, recipient inspection, signature verification, and clipboard-driven note import
-- Folder vaults and ZIP archive vaults with saved paths, pinned reopen behavior, and archive round-trip editing
-- Arbitrary file and folder encrypt, decrypt, sign, and verify workflows with detached signatures and preserved relative output structure for batch folder jobs
-- OpenPGP key management with import, export, lookup, keyserver search, publish, refresh, trust changes, expiry updates, passphrase rotation, certification, revocation export, and subkey creation
-- X.509 / S-MIME certificate inventory with create, import, export, PKCS#12, PKCS#8, passphrase change, validation, trust-root management, CRL import, and S/MIME file operations
-- Hardware token support for status, PIN change, service restart, fetch key, sync stubs, on-card key generation, moving local key material to card, and factory reset
-- Persistent recent activity feed with collapsible display and a settings toggle
+encryptKeeper is a Windows desktop workspace for OpenPGP and S/MIME work, built with [Tauri](https://tauri.app), React, and GnuPG. It started as an encrypted note editor and now covers three working areas:
 
-## Main Areas
+- **Note Vault**: encrypted notes stored as `.gpg` files in a folder vault or a ZIP archive vault
+- **Files**: encrypt, decrypt, sign, and verify arbitrary files and folders with OpenPGP or S/MIME
+- **Keyring**: OpenPGP keys, X.509 certificates, trust management, and hardware token workflows
+
+Everything runs locally. Cryptography is delegated to your installed GnuPG (`gpg` and `gpgsm`), and decrypted material is handled in secure temporary storage.
+
+## Features
 
 ### Note Vault
 
 - Open folder vaults and ZIP archive vaults
-- Save, pin, reopen, and manage vault entries
-- Create, open, edit, rename, save, refresh, and delete encrypted notes
-- Encrypt notes to selected recipients or save signed / symmetric notes
-- Inspect note recipients and verify note signatures on open
-- Import notes from clipboard text, PGP blocks, and detached signature flows
+- Save vault paths, pin them, and reopen them later (archive-aware, with vault-type badges)
+- Create, open, edit, rename, save, refresh, search, and delete encrypted notes
+- Encrypt notes to selected recipients, sign them, or protect them with a symmetric password
+- Inspect note recipients and verify note signatures when a note opens
+- Import notes from clipboard text, PGP blocks, and detached-signature flows
+- Auto-save after idle, auto-lock after a configurable timeout, and optional hiding of note names while locked
 
 ### Files
 
-- Encrypt, decrypt, sign, clear, and verify arbitrary files
+- Encrypt, decrypt, sign, and verify arbitrary files
 - Verify detached signatures
-- Queue files and folders together
-- Preserve folder structure when processing batch folder jobs
-- Choose output targets explicitly
-- Switch between `OpenPGP` and `S-MIME` file workflows
-- Reuse the selected key and recipient state from the integrated sidebar
+- Queue files and folders together and choose output targets explicitly
+- Batch folder jobs preserve the relative folder structure in their output
+- Switch between `OpenPGP` and `S-MIME` workflows
+- Reuse the selected key and recipient state from the sidebar
 
 ### Keyring
 
 - Browse OpenPGP keys and X.509 certificates in one workspace
-- Inspect identity, fingerprints, usage, trust, subkeys, certifications, and validation state
-- Import from files, pasted text, clipboard, WKD lookup, and public keyserver search
-- Export public, secret, combined, PKCS#12, and PKCS#8 material where supported
-- Update OpenPGP expiry, ownertrust, passphrases, certifications, revocation outputs, and subkeys
-- Manage X.509 trust roots, validation chains, trust snapshots, and CRL imports
-- Review recent import summaries and duplicate handling
+- Inspect identities, fingerprints, capabilities, subkeys, certifications, trust, and validation state
+- Import keys and certificates from files, pasted text, the clipboard, WKD lookup, or public keyserver search
+- Export public keys, private keys, and combined material; export PKCS#12 and PKCS#8 for X.509
+- Create OpenPGP keys (choose the algorithm) and X.509 certificates (self-signed)
+- Manage key expiry, ownertrust, passphrases, subkeys, certifications, and revocation certificates
+- Manage X.509 trust roots, view validated chains, import CRLs, and export or import trust snapshots
+- Review import summaries and duplicate handling for recently imported keys
 
-## OpenPGP Features
+### OpenPGP
 
 - Local key generation
 - Recipient selection for note and file encryption
 - Detached and inline signature workflows
-- Public keyserver publish, refresh, and full sync
+- Public keyserver lookup, publish, refresh, and full sync
 - WKD and auto-discovery lookup
 - Revocation certificate export
 - Ownertrust import and export
 - Passphrase rotation for existing secret keys
 - Certification visibility for signed user IDs
 
-## X.509 / S-MIME Features
+### X.509 / S/MIME
 
 - Self-signed X.509 certificate creation
-- Certificate import from file and pasted certificate text
-- Certificate export plus private material export through PKCS#12 and PKCS#8
-- S/MIME encrypt, decrypt, sign, and detached-verify in the `Files` tab
-- Validated chain view with compact validation summary
+- Certificate import from file or pasted certificate text
+- Certificate export, plus private material export through PKCS#12 and PKCS#8
+- S/MIME encrypt, decrypt, sign, and detached verify in the `Files` tab
+- Validated chain view with a compact validation summary
 - CRL import
-- Trust-root mark and unmark support through the local trust list
-- X.509 passphrase changes for certificates with private material
+- Trust-root mark and unmark through the local trust list
+- Passphrase changes for certificates that hold private material
 
-## Hardware Token Features
+### Hardware Tokens
 
 - Smartcard and token status panel in `Keyring`
-- Restart smartcard service
-- Change token PIN
-- Fetch linked public key from card metadata
+- Restart the smartcard service
+- Change the token PIN
+- Fetch the linked public key from card metadata
 - Sync local shadow stubs
 - Generate on-card key material by slot and algorithm
 - Store local OpenPGP key material onto the card
-- Factory reset with explicit confirmation
+- Factory reset, behind an explicit confirmation
 
-## Preferences And Activity
+### Preferences And Activity
 
-- Collapsible `Recent Activity` feed
-- `Show Recent History` setting to hide the panel entirely
-- Auto-lock timeout control
-- Auto-save
-- Clipboard integration
-- Recursive scan
-- Note-name hiding
-- Auto-show recipient and PGP block preferences
+- Collapsible **Recent Activity** feed
+- **Show Recent History** setting to hide the feed entirely
+- Auto-lock timeout and auto-save controls
+- Clipboard integration (**Use Clipboard**) for pasted PGP content
+- **Recursive scan** for nested folders
+- **Hide Note Names** to keep note names private while locked
+- Optional display of recipients and PGP blocks when a note opens
 
 ## Requirements
 
-To run from source, install:
+For end users:
 
-- Node.js
-- Rust
-- GnuPG with `gpg`, `gpgsm`, and smartcard support where needed
-- Tauri prerequisites for Windows
+- Windows 10 or 11
+- [GnuPG](https://gnupg.org/download/) with `gpg` and `gpgsm` on your `PATH`
+- A smartcard reader and the GnuPG smartcard service, only if you use hardware tokens
 
-Install dependencies:
+For building from source:
+
+- [Node.js](https://nodejs.org/) (v18 or newer)
+- [Rust](https://rustup.rs/) with the MSVC toolchain
+- Tauri's Windows prerequisites (WebView2 and the Visual Studio C++ build tools)
+- GnuPG, as above
+
+## Getting Started From Source
+
+Install the JavaScript dependencies:
 
 ```powershell
 npm install
 ```
 
-Verify the environment:
+Check that the environment is ready:
 
 ```powershell
 npm run check:env
 ```
 
-## Development
-
-Run the desktop app:
+Run the desktop app in development mode:
 
 ```powershell
 npm run tauri:dev
 ```
+
+Outside Tauri (for example in a plain browser at `http://localhost:1420`), the UI runs against a built-in mock backend. The mock shows a banner and performs no real encryption.
+
+## Building The Installer
+
+Create the production build and Windows installers:
+
+```powershell
+npm run tauri:build
+```
+
+The installers are written to `src-tauri/target/release/bundle/`:
+
+- `nsis/` for the NSIS `.exe` setup
+- `msi/` for the Windows Installer `.msi`
+
+## Testing
 
 Run the frontend tests:
 
@@ -135,18 +160,22 @@ Run the Rust tests:
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-Build the frontend bundle:
+Type-check and build the frontend bundle:
 
 ```powershell
 npm run build
 ```
 
-Create a production desktop build:
+## Project Layout
 
-```powershell
-npm run tauri:build
-```
+| Path | Purpose |
+| --- | --- |
+| `src/` | React + TypeScript UI (`App.tsx`, shared components, API bridge) |
+| `src/lib/` | Frontend API bridge, mock backend, and helpers |
+| `src-tauri/src/` | Rust backend: commands, vault, crypto, key manager, and session services |
+| `src-tauri/tauri.conf.json` | App metadata, window settings, and installer configuration |
+| `docs/images/` | README images |
 
 ## Release Notes
 
-See [CHANGELOG.md](CHANGELOG.md) for the `0.5.5` release summary.
+See [CHANGELOG.md](CHANGELOG.md) for the full version history. The current version is **1.0.0**.

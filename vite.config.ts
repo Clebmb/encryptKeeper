@@ -12,6 +12,11 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
+    watch: {
+      // Keep Vite's watcher off the Rust build output; Cargo rewrites those
+      // files mid-build and Windows reports EBUSY when Vite tries to watch them.
+      ignored: ["**/src-tauri/**"],
+    },
   },
   clearScreen: false,
 });

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.0 - encryptKeeper Professional
+
+First release under the **encryptKeeper Professional** product name. No behavior changes; this is a packaging and branding release that locks in the 1.0 version line and ships dedicated NSIS and MSI Windows installers.
+
+- Rebrand: app window title, product metadata, installer names, HTML title, and documentation reflect the **encryptKeeper Professional** name
+- Version bumped to `1.0.0` across `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`
+- Tauri bundler configured to emit both an **NSIS** installer and an **MSI** installer for Windows
+- Cargo binary identifier `com.clebmbsoftware.encryptkeeper` retained for upgrade compatibility with previously installed copies
+
 ## 0.5.5
 
 This release consolidates the full session work that moved encryptKeeper from a note-focused GPG utility into a broader OpenPGP and S/MIME desktop workspace.
